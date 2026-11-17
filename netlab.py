@@ -65,6 +65,18 @@ def validate_topology(topology: dict[str, Any]) -> None:
         command = node.get("command", ["sleep", "infinity"])
         if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
             raise TopologyError(f"node {node['name']} command must be a non-empty string list")
+        position = node.get("position", {"x": 100, "y": 100})
+        if not isinstance(position, dict) or not all(isinstance(position.get(axis), (int, float)) for axis in ("x", "y")):
+            raise TopologyError(f"node {node['name']} position must contain numeric x and y")
+
+    links = topology.get("links", [])
+    if not isinstance(links, list):
+        raise TopologyError("links must be a list")
+    for link in links:
+        if not isinstance(link, dict) or link.get("from") not in names or link.get("to") not in names:
+            raise TopologyError("each link must reference existing nodes with from and to")
+        if link["from"] == link["to"]:
+            raise TopologyError("a link cannot connect a node to itself")
 
     check = topology["connectivity_check"]
     if not isinstance(check, dict):

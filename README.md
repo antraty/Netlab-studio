@@ -389,3 +389,5 @@ python3 server.py --topology topology.json
 Puis ouvrir `http://127.0.0.1:8080` pour piloter le laboratoire, consulter les états et les journaux, et utiliser le terminal de diagnostic de chaque nœud.
 
 Cette interface est actuellement un prototype local : elle démontre le flux produit, mais ne constitue pas encore le service cloud public décrit par la vision. La prochaine priorité est de séparer proprement l’éditeur, l’API de contrôle et l’orchestrateur d’exécution afin de pouvoir déployer ces laboratoires sur une infrastructure distante et sécurisée.
+
+L’éditeur visuel initial est également disponible : les nœuds peuvent être déplacés, ajoutés, supprimés ou reliés, puis sauvegardés dans la topologie JSON. Ces liens sont d’abord graphiques ; leur traduction en réseaux et interfaces Docker isolés sera ajoutée au plan d’exécution.

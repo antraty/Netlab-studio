@@ -68,3 +68,9 @@ Cette interface est volontairement locale et ne fournit pas encore d’authentif
 ## Début de l’étape 2 — séparation du contrôle et de l’exécution
 
 Le serveur HTTP joue le rôle de plan de contrôle et délègue désormais les opérations à `DockerOrchestrator` dans `orchestrator.py`. Cette frontière permet de conserver la même API lorsqu’un moteur distant, une exécution sur VM ou un autre adaptateur sera ajouté. Le navigateur ne parle donc pas directement au CLI Docker.
+
+## Début de l’étape 3 — éditeur visuel
+
+L’interface comprend maintenant un éditeur SVG local : les nœuds sont déplaçables, un nouveau nœud peut être ajouté, deux nœuds peuvent être reliés et le nœud sélectionné peut être supprimé. Les positions et les liens sont conservés dans la topologie JSON (`position` sur les nœuds et `links` au niveau de la topologie).
+
+La sauvegarde utilise toujours `POST /api/topology`. Les liens représentent actuellement la topologie visuelle ; le moteur Docker utilise encore un réseau `bridge` partagé. La traduction de chaque lien en interfaces et réseaux isolés fera partie de l’évolution du plan d’exécution.

@@ -26,6 +26,12 @@ class TopologyTests(unittest.TestCase):
         with self.assertRaises(TopologyError):
             validate_topology(topology)
 
+    def test_links_must_reference_existing_nodes(self):
+        topology = load_topology(ROOT / "topology.json")
+        topology["links"].append({"from": "client-ubuntu", "to": "missing-node"})
+        with self.assertRaises(TopologyError):
+            validate_topology(topology)
+
     def test_invalid_json_is_rejected(self):
         path = ROOT / ".invalid-topology.json"
         path.write_text("{not json", encoding="utf-8")

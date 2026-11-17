@@ -10,17 +10,22 @@
     {
       "name": "client-ubuntu",
       "image": "ubuntu:24.04",
-      "command": ["sleep", "infinity"]
+      "command": ["sleep", "infinity"],
+      "position": {"x": 120, "y": 130}
     },
     {
       "name": "server-debian",
       "image": "debian:bookworm-slim",
-      "command": ["sleep", "infinity"]
+      "command": ["sleep", "infinity"],
+      "position": {"x": 520, "y": 130}
     }
   ],
   "connectivity_check": {
     "from": "client-ubuntu",
     "to": "server-debian",
     "command": ["ping", "-c", "1", "-W", "2", "server-debian"]
-  }
+  },
+  "links": [
+    {"from": "client-ubuntu", "to": "server-debian"}
+  ]
 }
