@@ -295,3 +295,11 @@ python3 netlab.py topology.json down
 ```
 
 Voir [PROTOTYPE.md](PROTOTYPE.md) pour les prérequis, le format de topologie et les tests locaux.
+
+L’étape 2 ajoute une interface web locale et son plan de contrôle minimal :
+
+```bash
+python3 server.py --topology topology.json
+```
+
+Puis ouvrir `http://127.0.0.1:8080` pour piloter le laboratoire, consulter les états et les journaux, et utiliser le terminal de diagnostic de chaque nœud.

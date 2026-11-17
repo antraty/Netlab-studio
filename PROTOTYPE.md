@@ -44,3 +44,23 @@ La validation et les tests de schéma ne requièrent pas Docker :
 ```bash
 python3 -m unittest -v
 ```
+
+## Étape 2 — laboratoire utilisable
+
+Le serveur de contrôle local et l’interface web sont disponibles dans `server.py` et `web/` :
+
+```bash
+python3 server.py --topology topology.json
+# ouvrir http://127.0.0.1:8080
+```
+
+L’interface permet de charger la topologie, de déployer ou arrêter le laboratoire, de lancer le test de connectivité, d’afficher l’état des nœuds et les événements, puis d’enregistrer la topologie. Un terminal par nœud accepte uniquement les commandes de diagnostic `hostname`, `uname`, `ip` et `ping` afin d’éviter d’exposer un shell arbitraire dans ce prototype.
+
+L’API HTTP expose les routes suivantes :
+
+- `GET /api/topology`, `POST /api/topology` ;
+- `GET /api/status` et `GET /api/logs` ;
+- `POST /api/up`, `/api/verify` et `/api/down` ;
+- `POST /api/nodes/<nom>/terminal`.
+
+Cette interface est volontairement locale et ne fournit pas encore d’authentification. Elle ne doit pas être exposée sur un réseau public avant l’ajout de l’isolation, des contrôles d’accès et des limites de ressources prévus par le projet.

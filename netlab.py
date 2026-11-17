@@ -78,12 +78,20 @@ def validate_topology(topology: dict[str, Any]) -> None:
 
 
 def docker(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["docker", *args],
-        check=False,
-        text=True,
-        capture_output=capture,
-    )
+    try:
+        return subprocess.run(
+            ["docker", *args],
+            check=False,
+            text=True,
+            capture_output=capture,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            ["docker", *args],
+            127,
+            "",
+            "Docker CLI is not installed or is not available in PATH",
+        )
 
 
 def resource_name(topology: dict[str, Any], node_name: str | None = None) -> str:
