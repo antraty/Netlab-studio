@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "lab": "linux-ping-demo",
+  "network": {
+    "name": "netlab-demo",
+    "driver": "bridge",
+    "subnet": "172.30.0.0/24"
+  },
+  "nodes": [
+    {
+      "name": "client-ubuntu",
+      "image": "ubuntu:24.04",
+      "command": ["sleep", "infinity"]
+    },
+    {
+      "name": "server-debian",
+      "image": "debian:bookworm-slim",
+      "command": ["sleep", "infinity"]
+    }
+  ],
+  "connectivity_check": {
+    "from": "client-ubuntu",
+    "to": "server-debian",
+    "command": ["ping", "-c", "1", "-W", "2", "server-debian"]
+  }
+}

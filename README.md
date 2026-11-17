@@ -282,3 +282,16 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 Projet au stade de l’idée et du cadrage initial.
 
 La prochaine étape est de transformer le MVP en prototype technique : **un client Ubuntu et un serveur Debian reliés dans un réseau Docker, déployables depuis une interface web et accessibles via des terminaux dans le navigateur**.
+
+## Prototype technique — étape 1
+
+Le premier prototype exécutable est disponible dans `netlab.py`. Il définit une topologie JSON version 1, crée un réseau Docker dédié, lance un client Ubuntu et un serveur Debian, puis vérifie leur connectivité réelle.
+
+```bash
+python3 netlab.py topology.json validate
+python3 netlab.py topology.json up
+python3 netlab.py topology.json verify
+python3 netlab.py topology.json down
+```
+
+Voir [PROTOTYPE.md](PROTOTYPE.md) pour les prérequis, le format de topologie et les tests locaux.
