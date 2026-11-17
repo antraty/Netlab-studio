@@ -226,6 +226,55 @@ L’architecture exacte sera définie pendant la conception, mais le projet peut
 
 La plateforme devra séparer clairement le plan de contrôle — qui décrit et administre les laboratoires — du plan d’exécution — qui fait tourner les environnements réels.
 
+## Stack cible et structure du projet
+
+La migration vers une stack structurée commence maintenant. Le backend cible utilise **FastAPI + Pydantic** pour le plan de contrôle et le frontend utilise **Vue 3 + TypeScript + Vite** pour l’éditeur. `orchestrator.py` reste indépendant du transport HTTP afin de pouvoir remplacer Docker local par un worker Docker distant ou un moteur de machines virtuelles.
+
+```text
+netlab-studio/
+├── backend/
+│   ├── app/
+│   │   ├── main.py           # application FastAPI et routes de contrôle
+│   │   └── models.py         # contrats Pydantic des topologies
+│   └── requirements.txt      # FastAPI, Uvicorn et Pydantic
+├── frontend/
+│   ├── src/
+│   │   ├── App.vue           # écran du laboratoire et éditeur
+│   │   ├── api.ts            # client HTTP typé
+│   │   ├── types.ts          # types TypeScript partagés côté UI
+│   │   └── style.css         # interface console de laboratoire
+│   ├── package.json          # Vue 3, TypeScript et Vite
+│   └── vite.config.ts        # proxy de développement vers FastAPI
+├── orchestrator.py           # plan d’exécution et adaptateur Docker
+├── topology.json             # scénario Ubuntu/Debian versionné
+├── netlab.py                 # primitives Docker et compatibilité CLI
+├── server.py                 # serveur legacy conservé pendant la migration
+└── web/                      # interface legacy temporaire
+```
+
+### Démarrage de la stack migrée
+
+Dans un terminal, installer puis démarrer l’API :
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r backend/requirements.txt
+uvicorn backend.app.main:app --reload --port 8000
+```
+
+Dans un second terminal, installer puis démarrer Vue :
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Ouvrir ensuite `http://127.0.0.1:5173`. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
+
+La migration est progressive : l’ancien serveur `server.py` et `web/` restent utilisables jusqu’à la validation complète de Vue. Les prochaines extensions sont le terminal WebSocket, la persistance PostgreSQL, l’authentification, les workers distants et l’exécution cloud sécurisée.
+
 ## Sécurité et isolation
 
 L’exécution de vrais systèmes implique des exigences de sécurité importantes. Le projet devra notamment prévoir :
