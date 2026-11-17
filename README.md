@@ -261,42 +261,95 @@ Netlab Studio peut s’adresser à plusieurs profils :
 6. **Extensible** : permettre l’ajout de nouvelles images, de nouveaux services et de nouveaux types de nœuds.
 7. **Sécurisé par défaut** : isoler les laboratoires et limiter les ressources dès la conception.
 
-## Feuille de route indicative
+## Feuille de route de développement
 
-### Étape 1 — Prototype technique
+La progression suit une règle simple : construire d’abord un moteur réel et sécurisé, puis ajouter l’expérience Packet Tracer, le cloud, les usages pédagogiques et l’assistance intelligente.
 
-- Définir le format d’une topologie.
-- Lancer deux conteneurs Linux.
-- Créer un réseau virtuel entre eux.
+### Étape 0 — Architecture et règles de sécurité
+
+- Séparer le plan de contrôle du plan d’exécution.
+- Stabiliser le format versionné des topologies.
+- Définir les limites CPU, mémoire, stockage et durée.
+- Préparer l’isolation entre utilisateurs et laboratoires.
+- Contrôler les images et les privilèges autorisés.
+- Prévoir l’authentification, les rôles, les logs et l’audit.
+
+### Étape 1 — Moteur local de laboratoire
+
+- Charger une topologie JSON.
+- Créer un réseau Docker et lancer deux conteneurs Linux.
 - Vérifier la connectivité réelle.
+- Obtenir l’état des nœuds et supprimer proprement les ressources.
 
-### Étape 2 — Premier laboratoire utilisable
+Cette étape est couverte par le prototype Docker actuel.
 
-- Ajouter l’éditeur visuel.
-- Ajouter le déploiement depuis l’interface.
-- Intégrer un terminal web.
-- Afficher les états et les logs.
-- Sauvegarder et restaurer un laboratoire.
+### Étape 2 — API de contrôle
 
-### Étape 3 — Expérience pédagogique
+- Créer, lire, modifier et supprimer un laboratoire.
+- Déployer, arrêter et redémarrer un laboratoire.
+- Consulter l’état des nœuds et les logs.
+- Garder l’API indépendante de l’interface web.
+- Introduire un orchestrateur interchangeable avec Docker comme premier moteur.
 
-- Créer des modèles de TP.
-- Ajouter le partage et la duplication.
-- Ajouter les rôles enseignant/étudiant.
-- Ajouter la remise à zéro d’un laboratoire.
+### Étape 3 — Éditeur visuel de topologie
 
-### Étape 4 — Services et supervision
+- Ajouter et déplacer des nœuds.
+- Choisir une image ou un type de nœud.
+- Créer et supprimer des liens.
+- Configurer les noms, interfaces et paramètres réseau.
+- Sauvegarder une topologie portable et versionnable.
 
-- Ajouter des images et services courants.
-- Ajouter les métriques de ressources.
-- Améliorer les diagnostics et les messages d’erreur.
-- Étudier l’intégration de machines virtuelles et d’appliances réseau.
+### Étape 4 — Terminal web réel
 
-### Étape 5 — Assistance avancée
+- Ouvrir un terminal interactif par nœud.
+- Afficher les logs et l’état réseau.
+- Gérer les sessions et leur fermeture propre.
+- Utiliser WebSocket ou un mécanisme temps réel contrôlé.
+- Ne jamais exposer directement le socket Docker au navigateur.
 
-- Analyser la topologie et les états du laboratoire.
-- Proposer des pistes de diagnostic.
-- Conserver une approche explicable et utile à l’apprentissage.
+### Étape 5 — Sauvegarde, restauration et reproductibilité
+
+- Sauvegarder, restaurer, cloner, importer et exporter un laboratoire.
+- Séparer la topologie, la configuration, l’état temporaire et les données persistantes.
+- Remettre un laboratoire dans son état initial.
+- Versionner les modifications.
+
+### Étape 6 — Déploiement cloud sécurisé
+
+- Exécuter les laboratoires sur une infrastructure distante.
+- Isoler les laboratoires et les réseaux entre utilisateurs.
+- Gérer les quotas, les expirations et la suppression automatique.
+- Stocker les topologies et les données persistantes.
+- Superviser l’orchestrateur et la consommation de ressources.
+
+### Étape 7 — Utilisateurs, rôles et partage pédagogique
+
+- Ajouter les comptes, rôles enseignant/étudiant et groupes.
+- Partager un laboratoire par fichier, lien ou modèle.
+- Dupliquer un laboratoire par étudiant.
+- Ajouter les modèles de TP, permissions et remises à zéro.
+- Suivre l’état des travaux pratiques.
+
+### Étape 8 — Services réseau et applicatifs
+
+- Ajouter progressivement Nginx, Apache, DNS, DHCP, MySQL, PostgreSQL, MongoDB, GitLab, Jenkins, WordPress et Laravel.
+- Décrire pour chaque image ses ports, ressources, variables et contraintes.
+- Étudier les appliances pfSense et MikroTik.
+- Étudier Windows Server et Active Directory lorsque l’infrastructure le permettra.
+
+### Étape 9 — Supervision et observabilité
+
+- Afficher les utilisateurs, nœuds, réseaux, logs et erreurs.
+- Mesurer CPU, mémoire, stockage et trafic réseau.
+- Ajouter les quotas, alertes et indicateurs d’utilisation.
+- Donner aux enseignants et administrateurs une vue globale des laboratoires actifs.
+
+### Étape 10 — Assistance intelligente
+
+- Analyser la topologie, les adresses IP, les routes, les VLAN et les logs.
+- Proposer des diagnostics explicables et des commandes de vérification.
+- Identifier les nœuds arrêtés, les routes manquantes et les services inaccessibles.
+- Ne pas modifier silencieusement le réseau ni remplacer l’apprentissage.
 
 ## Résumé
 
