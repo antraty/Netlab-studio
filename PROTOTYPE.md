@@ -82,3 +82,9 @@ La sauvegarde utilise toujours `POST /api/topology`. Les liens représentent act
 `backend/app/terminal.py` ouvre une session `docker exec -i ... sh -i` par connexion WebSocket. Les entrées du navigateur sont envoyées au shell et les sorties sont transférées en continu grâce à un lecteur dédié. La fermeture de la page arrête proprement le processus et ferme les flux.
 
 Cette première version est volontairement locale. Avant un déploiement cloud, il faudra ajouter l’authentification, l’autorisation par laboratoire, les quotas, les limites de durée et une isolation renforcée des processus.
+
+## Étape 5 — sauvegarde, restauration et reproductibilité
+
+`backend/app/storage.py` conserve maintenant les définitions de topologie dans `.netlab-data/` sous forme de versions immuables. Une sauvegarde crée une nouvelle version, une restauration crée une nouvelle version à partir d’une version précédente, et le clonage donne un nouveau laboratoire indépendant. L’état temporaire des conteneurs n’est pas mélangé à ces fichiers : il reste fourni par l’orchestrateur Docker.
+
+L’API expose `GET /api/laboratories/<lab>/versions`, `POST /api/laboratories/<lab>/restore/<version>`, `POST /api/laboratories/<lab>/clone`, `GET /api/laboratories/<lab>/export` et `POST /api/laboratories/import`. L’interface Vue propose les boutons de nouvelle version, restauration, clonage, export et import JSON.

@@ -92,3 +92,19 @@ class TopologyEnvelope(BaseModel):
 
 class TerminalRequest(BaseModel):
     command: list[str]
+
+
+class VersionInfo(BaseModel):
+    version: int
+    lab: str
+    created_at: str
+    reason: str
+
+
+class VersionsResponse(BaseModel):
+    lab: str
+    versions: list[VersionInfo]
+
+
+class CloneRequest(BaseModel):
+    new_lab: str

@@ -9,4 +9,6 @@
 - [x] Vérifier les tests backend et le build frontend.
 - [x] Remplacer l’interface legacy après validation et supprimer l’ancien serveur/interface.
 - [x] Ajouter un WebSocket pour le terminal, les sorties et la fermeture de session.
-- [ ] Étape future : PostgreSQL, utilisateurs, rôles et laboratoires cloud.
+- [x] Ajouter les versions locales, restauration, clonage et export/import JSON.
+- [ ] Migrer la persistance vers PostgreSQL lorsque plusieurs utilisateurs seront supportés.
+- [ ] Ajouter utilisateurs, rôles et laboratoires cloud.

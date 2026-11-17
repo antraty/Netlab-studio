@@ -6,3 +6,4 @@ __pycache__/
 .invalid-topology.json
 frontend/node_modules/
 frontend/dist/
+.netlab-data/

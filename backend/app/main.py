@@ -12,28 +12,54 @@ from fastapi.middleware.cors import CORSMiddleware
 import netlab
 from orchestrator import DockerOrchestrator, Orchestrator
 
-from .models import TerminalRequest, Topology, TopologyEnvelope
+from .models import CloneRequest, TerminalRequest, Topology, TopologyEnvelope, VersionInfo, VersionsResponse
+from .storage import StorageError, TopologyStore
 from .terminal import TerminalSession
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TOPOLOGY = ROOT / "topology.json"
+DEFAULT_DATA = ROOT / ".netlab-data"
 
 
 class ControlPlane:
     def __init__(self, topology_path: Path = DEFAULT_TOPOLOGY, orchestrator_factory: Callable = DockerOrchestrator):
         self.topology_path = topology_path
         self.orchestrator_factory = orchestrator_factory
-        self.topology = Topology.model_validate(netlab.load_topology(topology_path))
+        self.store = TopologyStore(Path(os.getenv("NETLAB_DATA_DIR", DEFAULT_DATA)))
+        initial = Topology.model_validate(netlab.load_topology(topology_path))
+        try:
+            initial = Topology.model_validate(self.store.load(initial.lab))
+        except StorageError:
+            pass
+        self.topology = initial
+        versions = self.store.list_versions(self.topology.lab)
+        self.current_version = versions[0]["version"] if versions else None
         self.orchestrator: Orchestrator = orchestrator_factory(self.topology.to_topology_dict())
         self.events: list[str] = []
 
     def save(self, topology: Topology) -> None:
         topology_dict = topology.to_topology_dict()
         netlab.validate_topology(topology_dict)
+        version = self.store.save(topology_dict)
         self.topology_path.write_text(json.dumps(topology_dict, indent=2) + "\n", encoding="utf-8")
         self.topology = topology
+        self.current_version = version["version"]
         self.orchestrator = self.orchestrator_factory(topology_dict)
-        self.record("topology saved")
+        self.record(f"topology saved as version {self.current_version}")
+
+    def restore(self, version: int) -> None:
+        topology_dict = self.store.restore(self.topology.lab, version)
+        topology = Topology.model_validate(topology_dict)
+        self.topology = topology
+        self.current_version = self.store.list_versions(topology.lab)[0]["version"]
+        self.topology_path.write_text(json.dumps(topology_dict, indent=2) + "\n", encoding="utf-8")
+        self.orchestrator = self.orchestrator_factory(topology_dict)
+        self.record(f"topology restored from version {version}")
+
+    def clone(self, new_lab: str) -> Topology:
+        topology = Topology.model_validate(self.store.clone(self.topology.lab, new_lab))
+        self.record(f"laboratory cloned as {new_lab}")
+        return topology
 
     def record(self, message: str) -> None:
         self.events.append(message)
@@ -60,6 +86,53 @@ def save_topology(envelope: TopologyEnvelope) -> dict[str, Topology]:
     try:
         control.save(envelope.topology)
     except (ValueError, netlab.TopologyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"topology": control.topology}
+
+
+@app.get("/api/laboratories/{lab}/versions", response_model=VersionsResponse)
+def list_versions(lab: str) -> VersionsResponse:
+    try:
+        return VersionsResponse(lab=lab, versions=control.store.list_versions(lab))
+    except StorageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/laboratories/{lab}/restore/{version}", response_model=TopologyEnvelope)
+def restore_version(lab: str, version: int) -> dict[str, Topology]:
+    if lab != control.topology.lab:
+        raise HTTPException(status_code=404, detail="laboratory is not active")
+    try:
+        control.restore(version)
+    except (StorageError, ValueError, netlab.TopologyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"topology": control.topology}
+
+
+@app.post("/api/laboratories/{lab}/clone", response_model=TopologyEnvelope)
+def clone_laboratory(lab: str, request: CloneRequest) -> dict[str, Topology]:
+    if lab != control.topology.lab:
+        raise HTTPException(status_code=404, detail="laboratory is not active")
+    try:
+        topology = control.clone(request.new_lab)
+    except (StorageError, ValueError, netlab.TopologyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"topology": topology}
+
+
+@app.get("/api/laboratories/{lab}/export")
+def export_laboratory(lab: str) -> dict[str, object]:
+    try:
+        return control.store.export(lab)
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/laboratories/import", response_model=TopologyEnvelope)
+def import_laboratory(envelope: TopologyEnvelope) -> dict[str, Topology]:
+    try:
+        control.save(envelope.topology)
+    except (StorageError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": control.topology}
 

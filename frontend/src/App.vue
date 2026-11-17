@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
-import type { Node, StatusNode, Topology } from './types'
+import type { Node, StatusNode, Topology, VersionInfo } from './types'
 
 const topology = ref<Topology | null>(null)
 const statuses = ref<StatusNode[]>([])
 const logs = ref<string[]>([])
+const versions = ref<VersionInfo[]>([])
 const selected = ref<string | null>(null)
 const linkMode = ref(false)
 const linkStart = ref<string | null>(null)
@@ -73,10 +74,15 @@ async function refresh(loadTopology = !dirty.value) {
   try {
     if (loadTopology) { const response = await api.topology(); topology.value = response.topology; selected.value ??= topology.value.nodes[0]?.name ?? null }
     const [status, eventLog] = await Promise.all([api.status(), api.logs()]); statuses.value = status.nodes; logs.value = eventLog.logs
+    if (topology.value) versions.value = (await api.versions(topology.value.lab)).versions
   } catch (error) { terminalOutput.value = error instanceof Error ? error.message : 'Erreur inconnue' }
 }
 async function action(name: 'up' | 'down' | 'verify') { const result = await api.action(name); terminalOutput.value = result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`; await refresh() }
 async function save() { if (!topology.value) return; await api.save(topology.value); dirty.value = false; await refresh() }
+async function restore() { if (!topology.value || !versions.value.length) return; const raw = window.prompt(`Version à restaurer (${versions.value.map(version => version.version).join(', ')})`, String(versions.value[0].version)); const version = Number(raw); if (!Number.isInteger(version)) return; const response = await api.restore(topology.value.lab, version); topology.value = response.topology; dirty.value = false; await refresh(false) }
+async function cloneLab() { if (!topology.value) return; const newLab = window.prompt('Nom du laboratoire cloné :', `${topology.value.lab}-copy`); if (!newLab) return; await api.clone(topology.value.lab, newLab); terminalOutput.value = `laboratoire cloné : ${newLab}`; await refresh(false) }
+async function exportLab() { if (!topology.value) return; const payload = await api.export(topology.value.lab); const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${topology.value.lab}.netlab.json`; link.click(); URL.revokeObjectURL(link.href) }
+async function importLab(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file) return; try { const payload = JSON.parse(await file.text()); const response = await api.import(payload.topology ?? payload); topology.value = response.topology; selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = false; terminalOutput.value = `laboratoire importé : ${topology.value.lab}`; await refresh(false) } catch (error) { terminalOutput.value = error instanceof Error ? error.message : 'Import invalide' } finally { input.value = '' } }
 async function runTerminal() { const socket = terminalSocket.value; const command = terminalCommand.value.trim(); if (!socket || socket.readyState !== WebSocket.OPEN || !command) { terminalOutput.value = 'Sélectionnez un nœud avec Docker actif.'; return }; socket.send(command); terminalCommand.value = '' }
 
 onMounted(async () => { await refresh(); timer = window.setInterval(() => refresh(), 5000) })
@@ -86,7 +92,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); terminalSocket.value
 <template>
   <header><div><p class="eyebrow">NETLAB STUDIO / FASTAPI + VUE</p><h1>{{ topology?.lab ?? 'Chargement…' }}</h1></div><span class="badge online">{{ stateText }}</span></header>
   <main v-if="topology">
-    <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Sauvegarder</button></section>
+    <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label></section>
     <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><button class="secondary" @click="addNode">+ Nœud</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Déplacez les nœuds par glisser-déposer. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
     <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal WebSocket</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
   </main>

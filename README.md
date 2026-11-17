@@ -236,6 +236,7 @@ netlab-studio/
 │   ├── app/
 │   │   ├── main.py           # application FastAPI et routes de contrôle
 │   │   ├── models.py         # contrats Pydantic des topologies
+│   │   ├── storage.py        # versions, restauration, clonage et export
 │   │   └── terminal.py       # sessions shell Docker via WebSocket
 │   └── requirements.txt      # FastAPI, Uvicorn et Pydantic
 ├── frontend/
@@ -247,6 +248,7 @@ netlab-studio/
 │   ├── package.json          # Vue 3, TypeScript et Vite
 │   └── vite.config.ts        # proxy de développement vers FastAPI
 ├── orchestrator.py           # plan d’exécution et adaptateur Docker
+├── .netlab-data/             # versions locales ignorées par Git
 ├── topology.json             # scénario Ubuntu/Debian versionné
 └── netlab.py                 # primitives Docker et compatibilité CLI
 ```
@@ -272,7 +274,7 @@ npm run dev
 
 Ouvrir ensuite `http://127.0.0.1:5173`. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
 
-La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket est disponible en prototype local. Les prochaines extensions sont la persistance PostgreSQL, l’authentification, les workers distants et l’exécution cloud sécurisée.
+La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket et la persistance versionnée locale sont disponibles en prototype. Les fichiers `.netlab-data/` décrivent la définition souhaitée des laboratoires ; l’état temporaire des conteneurs reste géré par l’orchestrateur. Les prochaines extensions sont PostgreSQL, l’authentification, les workers distants et l’exécution cloud sécurisée.
 
 ## Sécurité et isolation
 
