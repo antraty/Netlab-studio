@@ -1,10 +1,12 @@
 # Netlab Studio
 
-> La plateforme de laboratoire réseau réel, accessible depuis un navigateur.
+> **Packet Tracer + Docker + Cloud** : une plateforme de laboratoires réseau réels, accessible depuis un navigateur.
 
 ## Vision
 
-Netlab Studio est une plateforme qui permet de **concevoir, déployer et utiliser des laboratoires réseau complets depuis un navigateur**.
+Netlab Studio est une plateforme qui permet de **dessiner, déployer et utiliser des laboratoires réseau et système réels depuis un navigateur**.
+
+L’idée principale est de conserver la simplicité d’un outil de topologie comme Cisco Packet Tracer, tout en remplaçant la simulation par de vrais environnements exécutés à la demande dans Docker et, lorsque nécessaire, dans des machines virtuelles.
 
 L’utilisateur dessine une topologie — par exemple :
 
@@ -16,7 +18,21 @@ PC Ubuntu ─── Switch virtuel ─── Routeur
 
 Puis il clique sur **Déployer**. Netlab Studio crée les machines, configure les réseaux virtuels et démarre les services nécessaires dans un environnement isolé. L’utilisateur peut ensuite ouvrir un terminal sur chaque machine, configurer les adresses IP, lancer de vrais services et effectuer de vrais tests réseau.
 
-L’objectif n’est donc pas de simuler un réseau, mais de fournir un **laboratoire réseau fonctionnel et reproductible**.
+L’objectif n’est donc pas de simuler un réseau, mais de fournir un **laboratoire fonctionnel, reproductible et partageable**, dans lequel un `ping`, un serveur web, un service DNS ou une application produisent des résultats réels.
+
+## L’idée en une phrase
+
+L’utilisateur dessine sa topologie, clique sur **Déployer**, puis obtient automatiquement un environnement complet — conteneurs, machines virtuelles, réseaux virtuels et services — accessible depuis des terminaux dans le navigateur.
+
+Le projet doit rendre possible un laboratoire tel que celui-ci :
+
+```text
+Client Ubuntu (Docker) ─── Réseau virtuel ─── Serveur Debian (Docker)
+                                      │
+                              Pare-feu pfSense (VM)
+```
+
+Dans une version plus avancée, le même principe permettra de sélectionner un modèle comme **laboratoire Active Directory** et de provisionner automatiquement les machines et services nécessaires, sous réserve des capacités de l’infrastructure et des licences.
 
 ## Le problème
 
@@ -42,12 +58,27 @@ Netlab Studio s’inspire de l’expérience de création de topologies de Cisco
 | Équipements et commandes simulés | Conteneurs, machines virtuelles et commandes réelles |
 | Principalement orienté équipements Cisco | Linux, Windows, Docker, pfSense, MikroTik et autres systèmes selon les intégrations |
 | Services limités ou simulés | Apache, Nginx, DNS, DHCP, MySQL, GitLab, Jenkins, etc. |
+| Pas de déploiement applicatif généraliste | Déploiement possible de services et d’applications selon les images disponibles |
 | Installation locale nécessaire | Accès depuis un navigateur |
 | Laboratoire souvent recréé manuellement | Laboratoire exportable, partageable et reproductible |
 
 Le positionnement de Netlab Studio peut se résumer ainsi :
 
 > **La simplicité d’un outil de topologie, avec la puissance d’un véritable environnement Docker/VM dans le cloud.**
+
+### Ce qui distingue Netlab Studio
+
+Netlab Studio ne cherche pas à reproduire uniquement les commandes d’un équipement réseau. Sa valeur est de provisionner un environnement complet et de le rendre utilisable immédiatement :
+
+- **déploiement en un clic** d’un scénario ou d’un modèle de laboratoire ;
+- **systèmes et commandes réels**, et non des équipements simulés ;
+- **accès depuis un navigateur**, sans installation d’un simulateur sur chaque poste ;
+- **laboratoires partageables et reproductibles**, notamment pour les enseignants et les étudiants ;
+- **services applicatifs réels** comme Apache, Nginx, GitLab, Jenkins, MySQL, PostgreSQL, MongoDB, WordPress ou Laravel ;
+- **supervision en temps réel** des utilisateurs, conteneurs, ressources et erreurs ;
+- à terme, **assistance intelligente** capable d’analyser la topologie et de proposer des pistes de diagnostic explicables.
+
+Le navigateur est l’interface d’accès ; le plan d’exécution peut être hébergé sur une infrastructure distante afin que l’utilisateur n’ait pas à installer Docker ou les machines virtuelles localement.
 
 ## Expérience utilisateur cible
 
@@ -279,9 +310,9 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Projet au stade de l’idée et du cadrage initial.
+Le projet est au stade du **prototype technique**. L’idée produit et la vision long terme sont définies ; les premières briques exécutables couvrent actuellement un laboratoire Docker local composé d’un client Ubuntu et d’un serveur Debian, ainsi qu’une interface web locale de contrôle.
 
-La prochaine étape est de transformer le MVP en prototype technique : **un client Ubuntu et un serveur Debian reliés dans un réseau Docker, déployables depuis une interface web et accessibles via des terminaux dans le navigateur**.
+La cible reste plus large : **un client Ubuntu et un serveur Debian reliés dans un réseau Docker, déployables depuis une interface web et accessibles via des terminaux dans le navigateur**, puis des laboratoires multi-services, des machines virtuelles, le partage pédagogique, la supervision et l’exécution dans le cloud.
 
 ## Prototype technique — étape 1
 
@@ -303,3 +334,5 @@ python3 server.py --topology topology.json
 ```
 
 Puis ouvrir `http://127.0.0.1:8080` pour piloter le laboratoire, consulter les états et les journaux, et utiliser le terminal de diagnostic de chaque nœud.
+
+Cette interface est actuellement un prototype local : elle démontre le flux produit, mais ne constitue pas encore le service cloud public décrit par la vision. La prochaine priorité est de séparer proprement l’éditeur, l’API de contrôle et l’orchestrateur d’exécution afin de pouvoir déployer ces laboratoires sur une infrastructure distante et sécurisée.
