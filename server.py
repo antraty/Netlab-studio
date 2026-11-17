@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 import netlab
+from orchestrator import DockerOrchestrator, Orchestrator
 
 
 ROOT = Path(__file__).parent
@@ -19,9 +19,11 @@ WEB_ROOT = ROOT / "web"
 
 
 class ControlPlane:
-    def __init__(self, topology_path: Path) -> None:
+    def __init__(self, topology_path: Path, orchestrator_factory=DockerOrchestrator) -> None:
         self.topology_path = topology_path
+        self.orchestrator_factory = orchestrator_factory
         self.topology = netlab.load_topology(topology_path)
+        self.orchestrator: Orchestrator = orchestrator_factory(self.topology)
         self.events: list[str] = []
 
     def record(self, message: str) -> None:
@@ -32,34 +34,21 @@ class ControlPlane:
         netlab.validate_topology(topology)
         self.topology_path.write_text(json.dumps(topology, indent=2) + "\n", encoding="utf-8")
         self.topology = topology
+        self.orchestrator = self.orchestrator_factory(topology)
         self.record("topology saved")
 
     def action(self, name: str) -> dict[str, Any]:
-        actions = {"up": netlab.deploy, "down": netlab.destroy, "verify": netlab.verify}
-        if name not in actions:
-            raise ValueError(f"unsupported action: {name}")
-        result = actions[name](self.topology)
-        self.record(f"{name}: exit code {result}")
-        return {"ok": result == 0, "action": name, "exit_code": result, "logs": self.events}
+        result = self.orchestrator.action(name)
+        self.record(f"{name}: exit code {result.exit_code}")
+        return {"ok": result.ok, "action": name, "exit_code": result.exit_code, "logs": self.events}
 
     def status(self) -> list[dict[str, Any]]:
-        result = netlab.docker("ps", "-a", "--format", "{{.Names}}\\t{{.Status}}", capture=True)
-        if result.returncode:
-            return [{"name": node["name"], "state": "docker-unavailable"} for node in self.topology["nodes"]]
-        rows = dict(line.split("\t", 1) for line in result.stdout.splitlines() if "\t" in line)
-        return [{"name": node["name"], "state": rows.get(netlab.resource_name(self.topology, node["name"]), "stopped")} for node in self.topology["nodes"]]
+        return self.orchestrator.status()
 
     def terminal(self, node_name: str, command: list[str]) -> dict[str, Any]:
-        allowed = {"hostname", "uname", "ip", "ping"}
-        if not command or command[0] not in allowed:
-            raise ValueError("allowed terminal commands: hostname, uname, ip, ping")
-        names = {node["name"] for node in self.topology["nodes"]}
-        if node_name not in names:
-            raise ValueError(f"unknown node: {node_name}")
-        result = netlab.docker("exec", netlab.resource_name(self.topology, node_name), *command, capture=True)
-        output = (result.stdout + result.stderr).strip()
-        self.record(f"terminal {node_name}: {' '.join(command)} -> {result.returncode}")
-        return {"ok": result.returncode == 0, "exit_code": result.returncode, "output": output}
+        result = self.orchestrator.terminal(node_name, command)
+        self.record(f"terminal {node_name}: {' '.join(command)} -> {result.exit_code}")
+        return {"ok": result.ok, "exit_code": result.exit_code, "output": result.output}
 
 
 class Handler(BaseHTTPRequestHandler):

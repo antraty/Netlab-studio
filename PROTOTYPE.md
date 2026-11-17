@@ -64,3 +64,7 @@ L’API HTTP expose les routes suivantes :
 - `POST /api/nodes/<nom>/terminal`.
 
 Cette interface est volontairement locale et ne fournit pas encore d’authentification. Elle ne doit pas être exposée sur un réseau public avant l’ajout de l’isolation, des contrôles d’accès et des limites de ressources prévus par le projet.
+
+## Début de l’étape 2 — séparation du contrôle et de l’exécution
+
+Le serveur HTTP joue le rôle de plan de contrôle et délègue désormais les opérations à `DockerOrchestrator` dans `orchestrator.py`. Cette frontière permet de conserver la même API lorsqu’un moteur distant, une exécution sur VM ou un autre adaptateur sera ajouté. Le navigateur ne parle donc pas directement au CLI Docker.
