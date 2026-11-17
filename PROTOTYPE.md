@@ -45,32 +45,40 @@ La validation et les tests de schéma ne requièrent pas Docker :
 python3 -m unittest -v
 ```
 
-## Étape 2 — laboratoire utilisable
+## Étapes 2 et 3 — API FastAPI et éditeur Vue
 
-Le serveur de contrôle local et l’interface web sont disponibles dans `server.py` et `web/` :
+Le plan de contrôle et l’éditeur sont maintenant servis par FastAPI et Vue :
 
 ```bash
-python3 server.py --topology topology.json
-# ouvrir http://127.0.0.1:8080
+uvicorn backend.app.main:app --reload --port 8000
+cd frontend && npm install && npm run dev
+# ouvrir http://127.0.0.1:5173
 ```
 
-L’interface permet de charger la topologie, de déployer ou arrêter le laboratoire, de lancer le test de connectivité, d’afficher l’état des nœuds et les événements, puis d’enregistrer la topologie. Un terminal par nœud accepte uniquement les commandes de diagnostic `hostname`, `uname`, `ip` et `ping` afin d’éviter d’exposer un shell arbitraire dans ce prototype.
+L’interface permet de charger la topologie, déplacer/ajouter/supprimer/relier les nœuds, déployer ou arrêter le laboratoire, lancer le test de connectivité, afficher les états et enregistrer la topologie. Les contrats sont validés par Pydantic et l’orchestration reste dans `orchestrator.py`.
 
 L’API HTTP expose les routes suivantes :
 
 - `GET /api/topology`, `POST /api/topology` ;
 - `GET /api/status` et `GET /api/logs` ;
 - `POST /api/up`, `/api/verify` et `/api/down` ;
-- `POST /api/nodes/<nom>/terminal`.
+- `POST /api/nodes/<nom>/terminal` pour les commandes ponctuelles de compatibilité ;
+- `WS /ws/nodes/<nom>/terminal` pour le terminal interactif.
 
 Cette interface est volontairement locale et ne fournit pas encore d’authentification. Elle ne doit pas être exposée sur un réseau public avant l’ajout de l’isolation, des contrôles d’accès et des limites de ressources prévus par le projet.
 
-## Début de l’étape 2 — séparation du contrôle et de l’exécution
+## Étape 2 — séparation du contrôle et de l’exécution
 
-Le serveur HTTP joue le rôle de plan de contrôle et délègue désormais les opérations à `DockerOrchestrator` dans `orchestrator.py`. Cette frontière permet de conserver la même API lorsqu’un moteur distant, une exécution sur VM ou un autre adaptateur sera ajouté. Le navigateur ne parle donc pas directement au CLI Docker.
+FastAPI joue le rôle de plan de contrôle et délègue les opérations à `DockerOrchestrator` dans `orchestrator.py`. Cette frontière permet de conserver la même API lorsqu’un moteur distant, une exécution sur VM ou un autre adaptateur sera ajouté. Le navigateur ne parle donc pas directement au CLI Docker.
 
 ## Début de l’étape 3 — éditeur visuel
 
 L’interface comprend maintenant un éditeur SVG local : les nœuds sont déplaçables, un nouveau nœud peut être ajouté, deux nœuds peuvent être reliés et le nœud sélectionné peut être supprimé. Les positions et les liens sont conservés dans la topologie JSON (`position` sur les nœuds et `links` au niveau de la topologie).
 
 La sauvegarde utilise toujours `POST /api/topology`. Les liens représentent actuellement la topologie visuelle ; le moteur Docker utilise encore un réseau `bridge` partagé. La traduction de chaque lien en interfaces et réseaux isolés fera partie de l’évolution du plan d’exécution.
+
+## Étape 4 — terminal WebSocket
+
+`backend/app/terminal.py` ouvre une session `docker exec -i ... sh -i` par connexion WebSocket. Les entrées du navigateur sont envoyées au shell et les sorties sont transférées en continu grâce à un lecteur dédié. La fermeture de la page arrête proprement le processus et ferme les flux.
+
+Cette première version est volontairement locale. Avant un déploiement cloud, il faudra ajouter l’authentification, l’autorisation par laboratoire, les quotas, les limites de durée et une isolation renforcée des processus.

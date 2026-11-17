@@ -235,7 +235,8 @@ netlab-studio/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py           # application FastAPI et routes de contrôle
-│   │   └── models.py         # contrats Pydantic des topologies
+│   │   ├── models.py         # contrats Pydantic des topologies
+│   │   └── terminal.py       # sessions shell Docker via WebSocket
 │   └── requirements.txt      # FastAPI, Uvicorn et Pydantic
 ├── frontend/
 │   ├── src/
@@ -247,9 +248,7 @@ netlab-studio/
 │   └── vite.config.ts        # proxy de développement vers FastAPI
 ├── orchestrator.py           # plan d’exécution et adaptateur Docker
 ├── topology.json             # scénario Ubuntu/Debian versionné
-├── netlab.py                 # primitives Docker et compatibilité CLI
-├── server.py                 # serveur legacy conservé pendant la migration
-└── web/                      # interface legacy temporaire
+└── netlab.py                 # primitives Docker et compatibilité CLI
 ```
 
 ### Démarrage de la stack migrée
@@ -273,7 +272,7 @@ npm run dev
 
 Ouvrir ensuite `http://127.0.0.1:5173`. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
 
-La migration est progressive : l’ancien serveur `server.py` et `web/` restent utilisables jusqu’à la validation complète de Vue. Les prochaines extensions sont le terminal WebSocket, la persistance PostgreSQL, l’authentification, les workers distants et l’exécution cloud sécurisée.
+La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket est disponible en prototype local. Les prochaines extensions sont la persistance PostgreSQL, l’authentification, les workers distants et l’exécution cloud sécurisée.
 
 ## Sécurité et isolation
 
@@ -429,14 +428,15 @@ python3 netlab.py topology.json down
 
 Voir [PROTOTYPE.md](PROTOTYPE.md) pour les prérequis, le format de topologie et les tests locaux.
 
-L’étape 2 ajoute une interface web locale et son plan de contrôle minimal :
+Les étapes 2 et 3 sont maintenant portées par FastAPI et Vue :
 
 ```bash
-python3 server.py --topology topology.json
+uvicorn backend.app.main:app --reload --port 8000
+# dans un second terminal : cd frontend && npm run dev
 ```
 
-Puis ouvrir `http://127.0.0.1:8080` pour piloter le laboratoire, consulter les états et les journaux, et utiliser le terminal de diagnostic de chaque nœud.
+Puis ouvrir `http://127.0.0.1:5173` pour piloter le laboratoire, consulter les états et les journaux, et éditer la topologie.
 
-Cette interface est actuellement un prototype local : elle démontre le flux produit, mais ne constitue pas encore le service cloud public décrit par la vision. La prochaine priorité est de séparer proprement l’éditeur, l’API de contrôle et l’orchestrateur d’exécution afin de pouvoir déployer ces laboratoires sur une infrastructure distante et sécurisée.
+L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Cette fonction est actuellement réservée au prototype local : l’authentification, les quotas et l’isolation cloud doivent être ajoutés avant toute exposition publique.
 
 L’éditeur visuel initial est également disponible : les nœuds peuvent être déplacés, ajoutés, supprimés ou reliés, puis sauvegardés dans la topologie JSON. Ces liens sont d’abord graphiques ; leur traduction en réseaux et interfaces Docker isolés sera ajoutée au plan d’exécution.

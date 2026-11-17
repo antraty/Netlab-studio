@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 from typing import Callable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 import netlab
 from orchestrator import DockerOrchestrator, Orchestrator
 
 from .models import TerminalRequest, Topology, TopologyEnvelope
+from .terminal import TerminalSession
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TOPOLOGY = ROOT / "topology.json"
@@ -89,3 +91,35 @@ def run_terminal(node_name: str, request: TerminalRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     control.record(f"terminal {node_name}: {' '.join(request.command)} -> {result.exit_code}")
     return {"ok": result.ok, "exit_code": result.exit_code, "output": result.output}
+
+
+@app.websocket("/ws/nodes/{node_name}/terminal")
+async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
+    await websocket.accept()
+    session: TerminalSession | None = None
+    try:
+        if not isinstance(control.orchestrator, DockerOrchestrator):
+            await websocket.send_text("terminal backend is not available for this orchestrator\n")
+            return
+        session = TerminalSession(control.orchestrator.container_name(node_name))
+        await websocket.send_text(f"connected to {node_name}\n")
+        receive_task = asyncio.create_task(websocket.receive_text())
+        while True:
+            for chunk in session.drain():
+                await websocket.send_text(chunk.decode(errors="replace"))
+            if receive_task.done():
+                try:
+                    command = receive_task.result()
+                except WebSocketDisconnect:
+                    break
+                session.write(command)
+                control.record(f"terminal websocket {node_name}: command received")
+                receive_task = asyncio.create_task(websocket.receive_text())
+            await asyncio.sleep(0.05)
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        await websocket.send_text(f"terminal error: {exc}\n")
+    finally:
+        if "receive_task" in locals() and not receive_task.done():
+            receive_task.cancel()
+        if session:
+            session.close()

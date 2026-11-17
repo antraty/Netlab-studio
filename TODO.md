@@ -7,6 +7,6 @@
 - [x] Migrer l’éditeur visuel et la sauvegarde vers Vue.
 - [x] Ajouter le contrat de santé `/health` et la documentation OpenAPI.
 - [x] Vérifier les tests backend et le build frontend.
-- [ ] Remplacer progressivement l’interface legacy après validation.
-- [ ] Étape future : WebSocket pour terminal, logs et états temps réel.
+- [x] Remplacer l’interface legacy après validation et supprimer l’ancien serveur/interface.
+- [x] Ajouter un WebSocket pour le terminal, les sorties et la fermeture de session.
 - [ ] Étape future : PostgreSQL, utilisateurs, rôles et laboratoires cloud.

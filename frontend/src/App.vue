@@ -12,6 +12,7 @@ const linkStart = ref<string | null>(null)
 const dirty = ref(false)
 const terminalOutput = ref('Sélectionnez un nœud pour ouvrir son terminal.')
 const terminalCommand = ref('hostname')
+const terminalSocket = ref<WebSocket | null>(null)
 let timer: number | undefined
 
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
@@ -30,6 +31,16 @@ function selectNode(node: Node) {
     return
   }
   selected.value = node.name
+  connectTerminal(node.name)
+}
+function connectTerminal(nodeName: string) {
+  terminalSocket.value?.close()
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws/nodes/${encodeURIComponent(nodeName)}/terminal`)
+  socket.onopen = () => { terminalOutput.value = `Connexion au terminal de ${nodeName}…` }
+  socket.onmessage = event => { terminalOutput.value += event.data }
+  socket.onerror = () => { terminalOutput.value += '\nErreur de connexion terminal.' }
+  terminalSocket.value = socket
 }
 function removeSelected() {
   if (!topology.value || !selected.value) return
@@ -66,10 +77,10 @@ async function refresh(loadTopology = !dirty.value) {
 }
 async function action(name: 'up' | 'down' | 'verify') { const result = await api.action(name); terminalOutput.value = result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`; await refresh() }
 async function save() { if (!topology.value) return; await api.save(topology.value); dirty.value = false; await refresh() }
-async function runTerminal() { if (!selected.value) return; const result = await api.terminal(selected.value, terminalCommand.value.trim().split(/\s+/)); terminalOutput.value = result.output || `code de sortie : ${result.exit_code}`; await refresh(false) }
+async function runTerminal() { const socket = terminalSocket.value; const command = terminalCommand.value.trim(); if (!socket || socket.readyState !== WebSocket.OPEN || !command) { terminalOutput.value = 'Sélectionnez un nœud avec Docker actif.'; return }; socket.send(command); terminalCommand.value = '' }
 
 onMounted(async () => { await refresh(); timer = window.setInterval(() => refresh(), 5000) })
-onUnmounted(() => { if (timer) window.clearInterval(timer) })
+onUnmounted(() => { if (timer) window.clearInterval(timer); terminalSocket.value?.close() })
 </script>
 
 <template>
@@ -77,7 +88,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer) })
   <main v-if="topology">
     <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Sauvegarder</button></section>
     <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><button class="secondary" @click="addNode">+ Nœud</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Déplacez les nœuds par glisser-déposer. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
-    <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal web</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" /><button>Exécuter</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
+    <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal WebSocket</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
   </main>
   <p v-else class="loading">Impossible de charger le laboratoire. Vérifiez que FastAPI est démarré.</p>
   <footer>Netlab Studio — le navigateur pilote le plan de contrôle FastAPI, jamais Docker directement.</footer>

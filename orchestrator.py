@@ -71,3 +71,9 @@ class DockerOrchestrator:
             result.returncode,
             (result.stdout + result.stderr).strip(),
         )
+
+    def container_name(self, node_name: str) -> str:
+        names = {node["name"] for node in self.topology["nodes"]}
+        if node_name not in names:
+            raise ValueError(f"unknown node: {node_name}")
+        return netlab.resource_name(self.topology, node_name)
