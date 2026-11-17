@@ -12,3 +12,5 @@
 - [x] Ajouter les versions locales, restauration, clonage et export/import JSON.
 - [ ] Migrer la persistance vers PostgreSQL lorsque plusieurs utilisateurs seront supportés.
 - [ ] Ajouter utilisateurs, rôles et laboratoires cloud.
+- [x] Séparer FastAPI du worker Docker avec un contrat de jobs et un token de développement.
+- [ ] Ajouter une file de tâches, des identités de workers, des quotas et mTLS.

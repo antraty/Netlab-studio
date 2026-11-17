@@ -83,6 +83,12 @@ La sauvegarde utilise toujours `POST /api/topology`. Les liens représentent act
 
 Cette première version est volontairement locale. Avant un déploiement cloud, il faudra ajouter l’authentification, l’autorisation par laboratoire, les quotas, les limites de durée et une isolation renforcée des processus.
 
+## Étape 6 — séparation FastAPI / worker Docker
+
+`worker/main.py` est un second service FastAPI qui reçoit des jobs authentifiés par `Authorization: Bearer <token>`. Il est le seul composant qui appelle `DockerOrchestrator` et qui doit, à terme, avoir accès au socket Docker. Le plan de contrôle sélectionne ce worker avec `NETLAB_WORKER_URL` et `NETLAB_WORKER_TOKEN`; sans ces variables, il conserve le mode Docker local pour le développement.
+
+Le contrat actuel couvre les actions `up`, `down`, `verify`, `status` et `terminal` ponctuel. Le terminal WebSocket reste local pour l’instant ; son équivalent distant nécessitera un canal de streaming dédié. Cette séparation prépare les workers cloud sans prétendre encore fournir l’isolation multi-tenant.
+
 ## Étape 5 — sauvegarde, restauration et reproductibilité
 
 `backend/app/storage.py` conserve maintenant les définitions de topologie dans `.netlab-data/` sous forme de versions immuables. Une sauvegarde crée une nouvelle version, une restauration crée une nouvelle version à partir d’une version précédente, et le clonage donne un nouveau laboratoire indépendant. L’état temporaire des conteneurs n’est pas mélangé à ces fichiers : il reste fourni par l’orchestrateur Docker.

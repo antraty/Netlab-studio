@@ -239,6 +239,10 @@ netlab-studio/
 │   │   ├── storage.py        # versions, restauration, clonage et export
 │   │   └── terminal.py       # sessions shell Docker via WebSocket
 │   └── requirements.txt      # FastAPI, Uvicorn et Pydantic
+├── worker/
+│   ├── main.py               # service d’exécution Docker séparé
+│   ├── contracts.py          # contrat de jobs control-plane/worker
+│   └── requirements.txt      # dépendances du worker
 ├── frontend/
 │   ├── src/
 │   │   ├── App.vue           # écran du laboratoire et éditeur
@@ -247,7 +251,7 @@ netlab-studio/
 │   │   └── style.css         # interface console de laboratoire
 │   ├── package.json          # Vue 3, TypeScript et Vite
 │   └── vite.config.ts        # proxy de développement vers FastAPI
-├── orchestrator.py           # plan d’exécution et adaptateur Docker
+├── orchestrator.py           # adaptateurs Docker local et worker distant
 ├── .netlab-data/             # versions locales ignorées par Git
 ├── topology.json             # scénario Ubuntu/Debian versionné
 └── netlab.py                 # primitives Docker et compatibilité CLI
@@ -274,7 +278,26 @@ npm run dev
 
 Ouvrir ensuite `http://127.0.0.1:5173`. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
 
-La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket et la persistance versionnée locale sont disponibles en prototype. Les fichiers `.netlab-data/` décrivent la définition souhaitée des laboratoires ; l’état temporaire des conteneurs reste géré par l’orchestrateur. Les prochaines extensions sont PostgreSQL, l’authentification, les workers distants et l’exécution cloud sécurisée.
+La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket et la persistance versionnée locale sont disponibles en prototype. L’étape 6 ajoute la séparation entre le plan de contrôle et le worker Docker : lorsque `NETLAB_WORKER_URL` est défini, FastAPI envoie des jobs HTTP authentifiés au worker au lieu d’accéder au moteur Docker localement. Les fichiers `.netlab-data/` décrivent la définition souhaitée des laboratoires ; l’état temporaire des conteneurs reste géré par le worker.
+
+### Démarrer le worker séparé en développement
+
+Terminal 1 — worker Docker :
+
+```bash
+export NETLAB_WORKER_TOKEN=local-development-token
+uvicorn worker.main:app --host 127.0.0.1 --port 9000
+```
+
+Terminal 2 — API de contrôle :
+
+```bash
+export NETLAB_WORKER_URL=http://127.0.0.1:9000
+export NETLAB_WORKER_TOKEN=local-development-token
+uvicorn backend.app.main:app --reload --port 8000
+```
+
+Le worker doit rester sur un réseau privé ou localhost : le token est une première barrière de développement, pas encore une solution cloud complète. La prochaine évolution ajoutera une file de tâches, des identités de worker, des quotas et un transport mTLS.
 
 ## Sécurité et isolation
 
@@ -366,6 +389,7 @@ Cette étape est couverte par le prototype Docker actuel.
 
 ### Étape 6 — Déploiement cloud sécurisé
 
+- Séparer le serveur FastAPI du worker qui possède l’accès au moteur Docker.
 - Exécuter les laboratoires sur une infrastructure distante.
 - Isoler les laboratoires et les réseaux entre utilisateurs.
 - Gérer les quotas, les expirations et la suppression automatique.

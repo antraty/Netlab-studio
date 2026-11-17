@@ -7,6 +7,10 @@ added without changing the HTTP API.
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -77,3 +81,48 @@ class DockerOrchestrator:
         if node_name not in names:
             raise ValueError(f"unknown node: {node_name}")
         return netlab.resource_name(self.topology, node_name)
+
+
+class RemoteWorkerOrchestrator:
+    """Control-plane adapter that never accesses the Docker socket directly."""
+
+    def __init__(self, topology: dict[str, Any], base_url: str, token: str, timeout: float = 30) -> None:
+        netlab.validate_topology(topology)
+        self.topology = topology
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    def _request(self, action: str, node_name: str | None = None, command: list[str] | None = None) -> dict[str, Any]:
+        payload = {
+            "job_id": str(uuid.uuid4()),
+            "action": action,
+            "topology": self.topology,
+            "node_name": node_name,
+            "command": command or [],
+        }
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/jobs",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")
+            raise RuntimeError(f"worker returned HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"worker unavailable: {exc.reason}") from exc
+
+    def action(self, name: str) -> ActionResult:
+        result = self._request(name)
+        return ActionResult(bool(result["ok"]), name, int(result.get("exit_code", 0)), result.get("output", ""))
+
+    def status(self) -> list[dict[str, str]]:
+        return self._request("status").get("nodes", [])
+
+    def terminal(self, node_name: str, command: list[str]) -> ActionResult:
+        result = self._request("terminal", node_name, command)
+        return ActionResult(bool(result["ok"]), "terminal", int(result.get("exit_code", 0)), result.get("output", ""))

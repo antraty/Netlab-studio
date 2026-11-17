@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 import netlab
-from orchestrator import DockerOrchestrator, Orchestrator
+from orchestrator import DockerOrchestrator, Orchestrator, RemoteWorkerOrchestrator
 
 from .models import CloneRequest, TerminalRequest, Topology, TopologyEnvelope, VersionInfo, VersionsResponse
 from .storage import StorageError, TopologyStore
@@ -21,8 +21,15 @@ DEFAULT_TOPOLOGY = ROOT / "topology.json"
 DEFAULT_DATA = ROOT / ".netlab-data"
 
 
+def build_orchestrator(topology: dict) -> Orchestrator:
+    worker_url = os.getenv("NETLAB_WORKER_URL")
+    if worker_url:
+        return RemoteWorkerOrchestrator(topology, worker_url, os.getenv("NETLAB_WORKER_TOKEN", ""))
+    return DockerOrchestrator(topology)
+
+
 class ControlPlane:
-    def __init__(self, topology_path: Path = DEFAULT_TOPOLOGY, orchestrator_factory: Callable = DockerOrchestrator):
+    def __init__(self, topology_path: Path = DEFAULT_TOPOLOGY, orchestrator_factory: Callable = build_orchestrator):
         self.topology_path = topology_path
         self.orchestrator_factory = orchestrator_factory
         self.store = TopologyStore(Path(os.getenv("NETLAB_DATA_DIR", DEFAULT_DATA)))
@@ -67,7 +74,7 @@ class ControlPlane:
 
 
 control = ControlPlane(Path(os.getenv("NETLAB_TOPOLOGY", DEFAULT_TOPOLOGY)))
-app = FastAPI(title="Netlab Studio Control API", version="0.3.0")
+app = FastAPI(title="Netlab Studio Control API", version="0.4.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -172,7 +179,7 @@ async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
     session: TerminalSession | None = None
     try:
         if not isinstance(control.orchestrator, DockerOrchestrator):
-            await websocket.send_text("terminal backend is not available for this orchestrator\n")
+            await websocket.send_text("remote worker terminal streaming is not implemented yet; use the local worker mode\n")
             return
         session = TerminalSession(control.orchestrator.container_name(node_name))
         await websocket.send_text(f"connected to {node_name}\n")
