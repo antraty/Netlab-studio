@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
-import type { Assignment, Group, ServiceProfile, User } from './api'
+import type { Assignment, Group, ObservabilitySnapshot, ServiceProfile, User } from './api'
 import type { Node, StatusNode, Topology, VersionInfo } from './types'
 
 const user = ref<User | null>(null)
@@ -39,7 +39,13 @@ const memberEmail = ref('')
 const assignmentTitle = ref('')
 const selectedGroupId = ref('')
 const busy = ref(false)
+const observability = ref<ObservabilitySnapshot | null>(null)
+const observabilityLoading = ref(false)
+const observabilityError = ref('')
+const observabilityRefreshAllowed = ref(true)
 let timer: number | undefined
+let observabilityTimer: number | undefined
+let observabilityCooldownTimer: number | undefined
 
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
@@ -58,6 +64,8 @@ async function initialize() {
     if (!user.value) return
     if (user.value.role === 'teacher') {
       await refresh(true)
+      await loadObservability()
+      if (!observabilityTimer) observabilityTimer = window.setInterval(() => loadObservability(), 15000)
       await loadEducation()
       if (!timer) timer = window.setInterval(() => refresh(), 5000)
     } else {
@@ -82,8 +90,13 @@ async function bootstrap() {
 async function logout() {
   try { await api.logout() } catch { /* the session may already have expired */ }
   if (timer) window.clearInterval(timer)
+  if (observabilityTimer) window.clearInterval(observabilityTimer)
+  if (observabilityCooldownTimer) window.clearTimeout(observabilityCooldownTimer)
   timer = undefined
-  terminalSocket.value?.close(); user.value = null; topology.value = null; assignments.value = []; pageError.value = ''
+  observabilityTimer = undefined
+  observabilityCooldownTimer = undefined
+  observabilityRefreshAllowed.value = true
+  terminalSocket.value?.close(); user.value = null; topology.value = null; assignments.value = []; observability.value = null; pageError.value = ''
 }
 
 async function loadEducation() {
@@ -247,6 +260,39 @@ async function refresh(loadTopology = !dirty.value) {
     if (topology.value) versions.value = (await api.versions(topology.value.lab)).versions
   } catch (error) { showError(error) }
 }
+async function loadObservability() {
+  if (user.value?.role !== 'teacher' || observabilityLoading.value || !observabilityRefreshAllowed.value) return
+  observabilityLoading.value = true
+  observabilityRefreshAllowed.value = false
+  observabilityCooldownTimer = window.setTimeout(() => {
+    observabilityRefreshAllowed.value = true
+    observabilityCooldownTimer = undefined
+  }, 15000)
+  observabilityError.value = ''
+  try { observability.value = await api.observability() }
+  catch (error) { observabilityError.value = error instanceof Error ? error.message : 'Erreur inconnue' }
+  finally { observabilityLoading.value = false }
+}
+function bytesText(value: number | null) {
+  if (value === null || !Number.isFinite(value)) return 'Indisponible'
+  if (value < 0) return 'Indisponible'
+  if (value < 1024) return `${value} o`
+  const units = ['Kio', 'Mio', 'Gio', 'Tio']
+  let amount = value / 1024; let unit = 0
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++ }
+  return `${amount.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} ${units[unit]}`
+}
+function percentText(value: number | null) {
+  return value === null || !Number.isFinite(value) ? 'Indisponible' : `${value.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`
+}
+function numberText(value: number | null, suffix = '') {
+  return value === null || !Number.isFinite(value) ? 'Indisponible' : `${value.toLocaleString('fr-FR', { maximumFractionDigits: 2 })}${suffix}`
+}
+function collectedAtText(value: string | null) {
+  if (!value) return 'heure inconnue'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('fr-FR')
+}
 async function action(name: 'up' | 'down' | 'verify') { try { const result = await api.action(name); terminalOutput.value = result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`; await refresh() } catch (error) { showError(error) } }
 async function save() { if (!topology.value) return; try { await api.save(topology.value); dirty.value = false; await refresh() } catch (error) { showError(error) } }
 async function restore() { if (!topology.value || !versions.value.length) return; const raw = window.prompt(`Version à restaurer (${versions.value.map(version => version.version).join(', ')})`, String(versions.value[0].version)); const version = Number(raw); if (!Number.isInteger(version)) return; try { const response = await api.restore(topology.value.lab, version); topology.value = response.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
@@ -256,7 +302,7 @@ async function importLab(event: Event) { const input = event.target as HTMLInput
 async function runTerminal() { const socket = terminalSocket.value; const command = terminalCommand.value.trim(); if (!socket || socket.readyState !== WebSocket.OPEN || !command) { terminalOutput.value = 'Sélectionnez un nœud avec Docker actif.'; return }; socket.send(command); terminalCommand.value = '' }
 
 onMounted(async () => { await initialize() })
-onUnmounted(() => { if (timer) window.clearInterval(timer); terminalSocket.value?.close() })
+onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTimer) window.clearInterval(observabilityTimer); if (observabilityCooldownTimer) window.clearTimeout(observabilityCooldownTimer); terminalSocket.value?.close() })
 </script>
 
 <template>
@@ -303,8 +349,9 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); terminalSocket.value
   </template>
   <template v-else>
     <header><div><p class="eyebrow">NETLAB STUDIO / ESPACE ENSEIGNANT</p><h1>{{ topology?.lab ?? 'Laboratoire' }}</h1></div><div class="header-actions"><span class="badge online">{{ stateText }}</span><span class="badge">{{ user.display_name }}</span><button class="secondary" @click="logout">Déconnexion</button></div></header>
-    <main v-if="topology">
+    <main>
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
+      <template v-if="topology">
       <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label></section>
       <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
       <section class="panel catalog-panel"><div class="section-title"><div><h2>Catalogue de services</h2><span>{{ deployableServices.length }} profils déployables localement · {{ serviceCatalog.length }} documentés</span></div></div><div class="catalog-grid"><article v-for="profile in serviceCatalog" :key="profile.id" class="catalog-card"><div class="catalog-card-head"><h3>{{ profile.label }}</h3><span class="catalog-status" :class="profile.status">{{ profile.status === 'ready' ? 'disponible' : profile.status === 'planned' ? 'prévu' : 'étude' }}</span></div><code>{{ profile.image ?? 'image VM à définir' }}</code><p><strong>Ports :</strong> {{ portsText(profile) }}</p><p><strong>Ressources :</strong> {{ resourceText(profile) }}</p><p v-if="profile.environment.length"><strong>Variables :</strong> {{ profile.environment.map(item => `${item.name}${item.secret ? ' (secret)' : ''}`).join(', ') }}</p><ul><li v-for="constraint in profile.constraints" :key="constraint">{{ constraint }}</li></ul></article></div></section>
@@ -320,8 +367,67 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); terminalSocket.value
         <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Remis</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.submitted_at ? new Date(item.submitted_at * 1000).toLocaleString() : '—' }}</td></tr><tr v-if="!submissions.length"><td colspan="4" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
       </section>
       <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal WebSocket</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }} · {{ selectedNode ? nodeStatus(selectedNode.name) : '' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
+      </template>
+      <p v-if="!topology" class="loading">Impossible de charger le laboratoire. Vérifiez l’API et la configuration du compte.</p>
+      <section class="panel observability-panel" aria-labelledby="observability-title">
+        <div class="section-title observability-heading"><div><p class="eyebrow">SUPERVISION / ÉTAPE 9</p><h2 id="observability-title">État de la plateforme</h2><span v-if="observability?.collected_at">Collecté {{ collectedAtText(observability.collected_at) }}</span></div><div class="observability-actions"><span class="badge" :class="observability?.available ? 'online' : ''">{{ observabilityLoading && !observability ? 'Chargement…' : observability?.available ? 'Docker disponible' : 'Docker indisponible' }}</span><button class="secondary" :disabled="observabilityLoading || !observabilityRefreshAllowed" @click="loadObservability">{{ observabilityRefreshAllowed ? 'Actualiser' : 'Actualisation différée' }}</button></div></div>
+        <p v-if="observabilityError" class="observability-error">{{ observabilityError }}<span v-if="!observability">Le service de supervision n’est pas disponible pour le moment.</span></p>
+        <p v-if="observabilityLoading && !observability" class="hint">Chargement des indicateurs de supervision…</p>
+        <template v-if="observability?.available">
+          <div class="observability-stats">
+            <article class="obs-stat"><span>Laboratoires actifs</span><strong>{{ observability.active_lab_count }}</strong></article>
+            <article class="obs-stat"><span>Nœuds actifs</span><strong>{{ observability.running_node_count }}</strong></article>
+            <article class="obs-stat"><span>Utilisateurs</span><strong>{{ users.length }}</strong><small>comptes connus</small></article>
+          </div>
+          <div class="obs-section">
+            <div class="obs-section-title"><h3>Laboratoires</h3><span>{{ observability.labs.length }} recensé(s)</span></div>
+            <div v-if="observability.labs.length" class="obs-lab-grid">
+              <article v-for="lab in observability.labs" :key="lab.name" class="obs-lab-card">
+                <div class="obs-card-heading"><strong>{{ lab.name }}</strong><span class="badge">{{ lab.running_count }}/{{ lab.node_count }} nœud(s)</span></div>
+                <div class="obs-meter"><span>CPU</span><strong>{{ percentText(lab.cpu_percent) }}</strong></div>
+                <div class="obs-meter"><span>Mémoire</span><strong>{{ bytesText(lab.memory_usage_bytes) }}</strong></div>
+                <div class="obs-meter"><span>Réseau RX / TX</span><strong>{{ bytesText(lab.network_rx_bytes) }} / {{ bytesText(lab.network_tx_bytes) }}</strong></div>
+              </article>
+            </div>
+            <p v-else class="muted obs-empty">Aucun laboratoire actif recensé.</p>
+          </div>
+          <div class="obs-section">
+            <div class="obs-section-title"><h3>Nœuds</h3><span>{{ observability.nodes.length }} recensé(s)</span></div>
+            <div v-if="observability.nodes.length" class="obs-node-list">
+              <article v-for="node in observability.nodes" :key="node.id" class="obs-node-card">
+                <div class="obs-node-heading"><div><strong>{{ node.name }}</strong><small>{{ node.lab }} · {{ node.image }}</small></div><span class="catalog-status" :class="node.state === 'running' ? 'ready' : 'planned'">{{ node.state || 'état inconnu' }}</span></div>
+                <p class="obs-node-status">{{ node.status || 'Statut détaillé indisponible' }}<span v-if="node.ports"> · Ports {{ node.ports }}</span></p>
+                <div class="obs-node-metrics">
+                  <span>CPU <strong>{{ percentText(node.cpu_percent) }}</strong></span>
+                  <span>Mémoire <strong>{{ bytesText(node.memory_usage_bytes) }} / {{ bytesText(node.memory_limit_bytes) }}</strong> <small>({{ percentText(node.memory_percent) }})</small></span>
+                  <span>Writable <strong>{{ bytesText(node.writable_size_bytes) }}</strong></span>
+                  <span>I/O bloc R / W <strong>{{ bytesText(node.block_read_bytes) }} / {{ bytesText(node.block_write_bytes) }}</strong></span>
+                  <span>Trafic RX / TX <strong>{{ bytesText(node.network_rx_bytes) }} / {{ bytesText(node.network_tx_bytes) }}</strong></span>
+                  <span v-if="node.cpu_limit_cores !== null">Limite CPU <strong>{{ numberText(node.cpu_limit_cores, ' cœur(s)') }}</strong></span>
+                  <span v-if="node.pids_limit !== null">Limite PID <strong>{{ numberText(node.pids_limit) }}</strong></span>
+                </div>
+                <div v-if="node.networks.length" class="obs-tags"><span v-for="network in node.networks" :key="network">{{ network }}</span></div>
+              </article>
+            </div>
+            <p v-else class="muted obs-empty">Aucun nœud recensé.</p>
+          </div>
+          <div class="obs-two-columns">
+            <section class="obs-section"><div class="obs-section-title"><h3>Réseaux Docker</h3><span>{{ observability.networks.length }}</span></div><div v-if="observability.networks.length" class="obs-table-wrap"><table class="obs-table"><thead><tr><th>Réseau</th><th>Laboratoire</th><th>Pilote</th><th>Portée</th></tr></thead><tbody><tr v-for="network in observability.networks" :key="`${network.name}-${network.lab ?? 'global'}`"><td>{{ network.name }}</td><td>{{ network.lab ?? 'Global' }}</td><td>{{ network.driver || 'Indisponible' }}</td><td>{{ network.scope || 'Indisponible' }}</td></tr></tbody></table></div><p v-else class="muted obs-empty">Aucun réseau recensé.</p></section>
+            <section class="obs-section"><div class="obs-section-title"><h3>Stockage Docker</h3><span>Vue globale</span></div><div v-if="observability.storage.length" class="obs-table-wrap"><table class="obs-table"><thead><tr><th>Type</th><th>Objets actifs / total</th><th>Utilisé</th><th>Récupérable</th></tr></thead><tbody><tr v-for="storage in observability.storage" :key="storage.kind"><td>{{ storage.kind }}</td><td>{{ numberText(storage.active_count) }} / {{ numberText(storage.total_count) }}</td><td>{{ bytesText(storage.used_bytes) }}</td><td>{{ bytesText(storage.reclaimable_bytes) }}</td></tr></tbody></table></div><p v-else class="muted obs-empty">Aucune donnée de stockage.</p></section>
+          </div>
+          <div class="obs-two-columns obs-messages">
+            <section class="obs-section"><div class="obs-section-title"><h3>Alertes et erreurs</h3><span>{{ observability.alerts.length + observability.errors.length }}</span></div><ul class="obs-message-list"><li v-for="(alert, index) in observability.alerts" :key="`alert-${index}`" class="obs-message" :class="alert.severity"><strong>{{ alert.severity === 'error' ? 'Erreur' : 'Alerte' }}<span v-if="alert.lab"> · {{ alert.lab }}</span><span v-if="alert.node"> / {{ alert.node }}</span></strong><p>{{ alert.message }}</p></li><li v-for="(error, index) in observability.errors" :key="`error-${index}`" class="obs-message error"><strong>Erreur de collecte</strong><p>{{ error }}</p></li><li v-if="!observability.alerts.length && !observability.errors.length" class="muted">Aucune alerte ni erreur.</li></ul></section>
+            <section class="obs-section"><div class="obs-section-title"><h3>Événements récents</h3><span>{{ observability.events.length }}{{ observability.truncated ? '+' : '' }}</span></div><ul class="obs-event-list"><li v-for="(event, index) in observability.events" :key="index">{{ event }}</li><li v-if="!observability.events.length" class="muted">Aucun événement récent.</li></ul><p v-if="observability.truncated" class="obs-truncated">Liste tronquée par le service.</p></section>
+          </div>
+          <p class="obs-thresholds">Seuils configurés — CPU {{ percentText(observability.thresholds.cpu_percent) }} · mémoire {{ percentText(observability.thresholds.memory_percent) }} · espace writable {{ numberText(observability.thresholds.writable_storage_mb, ' Mo') }}</p>
+        </template>
+        <div v-else-if="!observabilityLoading && !observabilityError && observability">
+          <p class="obs-unavailable">Le moteur Docker est absent ou indisponible. Les données de supervision ne peuvent pas être collectées pour le moment.</p>
+          <ul v-if="observability.errors.length" class="obs-message-list"><li v-for="(error, index) in observability.errors" :key="`unavailable-${index}`" class="obs-message error"><strong>Erreur de collecte</strong><p>{{ error }}</p></li></ul>
+        </div>
+        <p v-else-if="!observability && !observabilityLoading && !observabilityError" class="obs-unavailable">Aucune donnée de supervision n’est disponible.</p>
+      </section>
     </main>
-    <p v-else class="loading">Impossible de charger le laboratoire. Vérifiez l’API et la configuration du compte.</p>
     <footer>Netlab Studio — accès réservé au compte enseignant ; les étudiants ne reçoivent pas d’accès au socket Docker.</footer>
   </template>
 </template>

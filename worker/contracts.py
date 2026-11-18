@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-JobAction = Literal["up", "down", "verify", "status", "terminal"]
+JobAction = Literal["up", "down", "verify", "status", "terminal", "observability"]
 
 
 class WorkerJob(BaseModel):
@@ -23,3 +23,4 @@ class WorkerResult(BaseModel):
     exit_code: int = 0
     output: str = ""
     nodes: list[dict[str, str]] = Field(default_factory=list)
+    observability: dict[str, Any] | None = None

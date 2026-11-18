@@ -36,6 +36,80 @@ export interface ServiceProfile {
   deployable: boolean
 }
 
+export interface ObservabilityLab {
+  name: string
+  node_count: number
+  running_count: number
+  cpu_percent: number | null
+  memory_usage_bytes: number | null
+  network_rx_bytes: number | null
+  network_tx_bytes: number | null
+}
+
+export interface ObservabilityNode {
+  id: string
+  lab: string
+  name: string
+  image: string
+  state: string
+  status: string
+  networks: string[]
+  ports: string
+  cpu_percent: number | null
+  memory_usage_bytes: number | null
+  memory_limit_bytes: number | null
+  memory_percent: number | null
+  cpu_limit_cores: number | null
+  pids_limit: number | null
+  writable_size_bytes: number | null
+  block_read_bytes: number | null
+  block_write_bytes: number | null
+  network_rx_bytes: number | null
+  network_tx_bytes: number | null
+}
+
+export interface ObservabilityNetwork {
+  name: string
+  lab: string | null
+  driver: string
+  scope: string
+}
+
+export interface ObservabilityStorage {
+  kind: string
+  total_count: number | null
+  active_count: number | null
+  used_bytes: number | null
+  reclaimable_bytes: number | null
+}
+
+export interface ObservabilityAlert {
+  severity: 'warning' | 'error'
+  lab?: string
+  node?: string
+  message: string
+}
+
+export interface ObservabilitySnapshot {
+  available: boolean
+  collected_at: string | null
+  active_lab_count: number
+  running_node_count: number
+  labs: ObservabilityLab[]
+  nodes: ObservabilityNode[]
+  networks: ObservabilityNetwork[]
+  storage: ObservabilityStorage[]
+  alerts: ObservabilityAlert[]
+  errors: string[]
+  events: string[]
+  truncated: boolean
+  thresholds: {
+    cpu_percent: number
+    memory_percent: number
+    writable_storage_mb: number
+  }
+}
+
 function cookie(name: string): string | undefined {
   const prefix = `${encodeURIComponent(name)}=`
   const entry = document.cookie.split('; ').find(value => value.startsWith(prefix))
@@ -60,6 +134,7 @@ export const api = {
   services: () => request<{ services: ServiceProfile[] }>('/api/services'),
   authState: () => request<{ has_users: boolean; bootstrap_enabled: boolean }>('/api/auth/state'),
   me: () => request<{ user: User }>('/api/auth/me'),
+  observability: () => request<ObservabilitySnapshot>('/api/observability'),
   login: (email: string, password: string) => request<{ user: User; csrf_token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   bootstrap: (payload: { bootstrap_token: string; email: string; display_name: string; password: string }) => request<{ user: User; csrf_token: string }>('/api/auth/bootstrap', { method: 'POST', body: JSON.stringify(payload) }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST', body: '{}' }),

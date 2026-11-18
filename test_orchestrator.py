@@ -1,7 +1,9 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from orchestrator import DockerOrchestrator
 from netlab import TopologyError, load_topology
@@ -38,6 +40,28 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(caught.exception.status_code, 503)
             worker_main.TOKEN = "test-worker-token"
             worker_main.require_token("Bearer test-worker-token")
+        finally:
+            worker_main.TOKEN = previous
+
+    def test_worker_proxies_observability_with_bearer_authentication(self):
+        import worker.main as worker_main
+
+        previous = worker_main.TOKEN
+        worker_main.TOKEN = "test-observability-token"
+        sample = {"available": True, "active_lab_count": 3, "nodes": []}
+        try:
+            with patch.object(worker_main.DockerOrchestrator, "observability", return_value=sample) as observe:
+                with TestClient(worker_main.app) as client:
+                    payload = {"job_id": "test-job", "action": "observability", "topology": self.topology}
+                    denied = client.post("/v1/jobs", json=payload)
+                    self.assertEqual(denied.status_code, 401)
+                    response = client.post(
+                        "/v1/jobs", json=payload,
+                        headers={"Authorization": "Bearer test-observability-token"},
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["observability"]["active_lab_count"], 3)
+                    observe.assert_called_once_with()
         finally:
             worker_main.TOKEN = previous
 

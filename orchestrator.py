@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import netlab
+from backend.app.observability import collect_docker_observability
 
 
 @dataclass
@@ -28,6 +29,7 @@ class ActionResult:
 class Orchestrator(Protocol):
     def action(self, name: str) -> ActionResult: ...
     def status(self) -> list[dict[str, str]]: ...
+    def observability(self) -> dict[str, Any]: ...
     def terminal(self, node_name: str, command: list[str]) -> ActionResult: ...
 
 
@@ -82,6 +84,9 @@ class DockerOrchestrator:
             raise ValueError(f"unknown node: {node_name}")
         return netlab.resource_name(self.topology, node_name)
 
+    def observability(self) -> dict[str, Any]:
+        return collect_docker_observability()
+
 
 class RemoteWorkerOrchestrator:
     """Control-plane adapter that never accesses the Docker socket directly."""
@@ -122,6 +127,23 @@ class RemoteWorkerOrchestrator:
 
     def status(self) -> list[dict[str, str]]:
         return self._request("status").get("nodes", [])
+
+    def observability(self) -> dict[str, Any]:
+        return self._request("observability").get("observability") or {
+            "available": False,
+            "collected_at": None,
+            "active_lab_count": 0,
+            "running_node_count": 0,
+            "labs": [],
+            "nodes": [],
+            "networks": [],
+            "storage": [],
+            "alerts": [],
+            "errors": ["la supervision du worker distant n’est pas disponible"],
+            "events": [],
+            "truncated": False,
+            "thresholds": {"cpu_percent": 80, "memory_percent": 80, "writable_storage_mb": 1024},
+        }
 
     def terminal(self, node_name: str, command: list[str]) -> ActionResult:
         result = self._request("terminal", node_name, command)

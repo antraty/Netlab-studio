@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -85,6 +86,7 @@ class EducationApiTests(unittest.TestCase):
     def test_private_api_requires_login_and_csrf(self):
         response = self.client.get("/api/topology")
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.client.get("/api/observability").status_code, 401)
         self.client.post("/api/auth/bootstrap", json={
             "bootstrap_token": "test-setup-secret", "email": "teacher@example.test",
             "display_name": "Teacher", "password": "long-password-123",
@@ -92,6 +94,19 @@ class EducationApiTests(unittest.TestCase):
         response = self.client.get("/api/services")
         self.assertEqual(response.status_code, 200)
         self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache"})
+        from backend.app.main import control
+        sample = {
+            "available": True,
+            "active_lab_count": 1,
+            "running_node_count": 2,
+            "labs": [], "nodes": [], "networks": [], "storage": [], "alerts": [], "errors": [],
+            "events": [], "truncated": False,
+            "thresholds": {"cpu_percent": 80, "memory_percent": 80, "writable_storage_mb": 1024},
+        }
+        with patch.object(control.orchestrator, "observability", return_value=sample):
+            response = self.client.get("/api/observability")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["active_lab_count"], 1)
         response = self.client.post("/api/education/groups", json={"name": "No CSRF"})
         self.assertEqual(response.status_code, 403)
 

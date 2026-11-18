@@ -176,6 +176,25 @@ def get_status() -> dict[str, list[dict[str, str]]]:
     return {"nodes": control.orchestrator.status()}
 
 
+@app.get("/api/observability", dependencies=[Depends(require_teacher)])
+def get_observability() -> dict[str, object]:
+    snapshot = control.orchestrator.observability()
+    recent_events = control.events[-100:]
+    failed_events = [
+        event for event in recent_events
+        if "exit code " in event
+        and event.rsplit("exit code ", 1)[-1].isdigit()
+        and int(event.rsplit("exit code ", 1)[-1]) != 0
+    ]
+    snapshot["events"] = recent_events
+    snapshot["errors"] = [*snapshot.get("errors", []), *failed_events]
+    snapshot["alerts"] = [
+        *snapshot.get("alerts", []),
+        *({"severity": "error", "message": event} for event in failed_events),
+    ]
+    return snapshot
+
+
 @app.get("/api/logs", dependencies=[Depends(require_teacher)])
 def get_logs() -> dict[str, list[str]]:
     return {"logs": control.events}

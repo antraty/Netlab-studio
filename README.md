@@ -433,6 +433,12 @@ CoreDNS, DHCP/dnsmasq, PostgreSQL, MySQL, MongoDB, WordPress, Jenkins, GitLab et
 - Ajouter les quotas, alertes et indicateurs d’utilisation.
 - Donner aux enseignants et administrateurs une vue globale des laboratoires actifs.
 
+#### Première tranche locale
+
+L’endpoint enseignant `GET /api/observability` fournit un instantané global des conteneurs et réseaux Docker portant les labels Netlab, relayé aussi par le worker distant authentifié. L’interface regroupe les laboratoires actifs, comptes, nœuds, état, CPU, mémoire/limite, taille de la couche inscriptible, lectures/écritures bloc, trafic RX/TX, stockage Docker (`system df`), événements et erreurs. Les collectes sont limitées à 100 conteneurs et les métriques sont actualisées au plus toutes les 15 secondes.
+
+Les limites CPU/mémoire/PID par conteneur de l’étape 8 restent les quotas durs disponibles. Les seuils d’alerte (CPU 80 %, mémoire 80 %, couche inscriptible 1 024 Mo par défaut) sont configurables par variables `NETLAB_ALERT_CPU_PERCENT`, `NETLAB_ALERT_MEMORY_PERCENT` et `NETLAB_ALERT_WRITABLE_STORAGE_MB`. Les métriques ne sont pas historisées, les alertes ne sont pas envoyées à l’extérieur et aucun quota agrégé par utilisateur/laboratoire n’est encore appliqué. Si le moteur Docker est indisponible, l’interface signale l’erreur au lieu d’échouer.
+
 ### Étape 10 — Assistance intelligente
 
 - Analyser la topologie, les adresses IP, les routes, les VLAN et les logs.

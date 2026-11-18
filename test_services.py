@@ -37,6 +37,9 @@ class ServiceCatalogTests(unittest.TestCase):
         self.assertIn("--cpus", args)
         self.assertIn("0.5", args)
         self.assertIn("--pids-limit", args)
+        self.assertIn("io.netlab.studio.memory-mb=512", args)
+        self.assertIn("io.netlab.studio.cpu-cores=0.5", args)
+        self.assertIn("io.netlab.studio.pids=128", args)
         self.assertIn("127.0.0.1:8088:80/tcp", args)
         self.assertNotIn("0.0.0.0:8088:80/tcp", args)
 
