@@ -70,10 +70,14 @@ PROFILES: tuple[ServiceProfile, ...] = (
         constraints=_READY_CONSTRAINTS + ("La configuration et les fichiers du site ne sont pas encore montés depuis un volume.",),
     ),
     ServiceProfile(
-        id="coredns", label="CoreDNS", category="dns", status="planned",
-        image="coredns/coredns:1.12.0", command=(), ports=(ServicePort(53, "udp", False), ServicePort(53, "tcp", False)), primary_port=None,
-        resources={"recommended_memory_mb": 256, "recommended_cpu_cores": 0.25}, environment=(),
-        constraints=("Configuration Corefile et montage de fichiers requis.", "Publication DNS et adressage spécifiques non encore pris en charge."),
+        id="coredns", label="CoreDNS — DNS autoritatif de laboratoire", category="dns", status="ready",
+        image="coredns/coredns:1.12.0", command=("-conf", "/etc/coredns/Corefile"),
+        ports=(ServicePort(53, "udp", False), ServicePort(53, "tcp", False)), primary_port=None,
+        resources={"memory_mb": 256, "cpu_cores": 0.25, "pids": 64}, environment=(),
+        constraints=_READY_CONSTRAINTS + (
+            "Les entrées A sont générées depuis la topologie et limitées aux adresses IPv4 des sous-réseaux du laboratoire.",
+            "Le DNS écoute uniquement dans les segments du laboratoire ; aucune publication de port hôte n’est disponible.",
+        ),
     ),
     ServiceProfile(
         id="dnsmasq", label="dnsmasq — DNS/DHCP", category="network", status="planned",

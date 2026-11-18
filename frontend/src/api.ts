@@ -17,9 +17,18 @@ export interface Assignment {
   title: string
   group_name: string
   status: 'assigned' | 'in_progress' | 'submitted'
+  runtime_status: 'stopped' | 'running' | 'expired' | 'failed'
   created_at: number
   submitted_at: number | null
   topology: Topology
+}
+export interface Laboratory {
+  id: string
+  name: string
+  status: 'stopped' | 'running' | 'expired' | 'failed'
+  created_at: number
+  expires_at: number
+  role: 'owner' | 'editor' | 'viewer'
 }
 export interface ServiceProfile {
   id: string
@@ -38,6 +47,7 @@ export interface ServiceProfile {
 
 export interface ObservabilityLab {
   name: string
+  laboratory_id?: string | null
   node_count: number
   running_count: number
   cpu_percent: number | null
@@ -48,6 +58,7 @@ export interface ObservabilityLab {
 
 export interface ObservabilityNode {
   id: string
+  laboratory_id?: string | null
   lab: string
   name: string
   image: string
@@ -71,6 +82,7 @@ export interface ObservabilityNode {
 export interface ObservabilityNetwork {
   name: string
   lab: string | null
+  laboratory_id?: string | null
   driver: string
   scope: string
 }
@@ -145,11 +157,14 @@ export const api = {
   createGroup: (name: string) => request<{ group: Group }>('/api/education/groups', { method: 'POST', body: JSON.stringify({ name }) }),
   addMember: (groupId: string, email: string) => request<{ ok: boolean }>(`/api/education/groups/${encodeURIComponent(groupId)}/members`, { method: 'POST', body: JSON.stringify({ email }) }),
   assign: (groupId: string, title: string, topology: Topology) => request<{ assignment: { id: string; title: string } }>(`/api/education/groups/${encodeURIComponent(groupId)}/assignments`, { method: 'POST', body: JSON.stringify({ title, topology }) }),
-  submissions: (groupId: string) => request<{ submissions: Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; submitted_at: number | null }> }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
+  submissions: (groupId: string) => request<{ submissions: Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; runtime_status: string; submitted_at: number | null }> }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
   myAssignments: () => request<{ assignments: Assignment[] }>('/api/education/my-assignments'),
   cloneAssignment: (assignmentId: string) => request<{ topology: Topology }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/clone`, { method: 'POST', body: '{}' }),
   saveAssignmentTopology: (assignmentId: string, topology: Topology) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/topology`, { method: 'PUT', body: JSON.stringify({ topology }) }),
   submitAssignment: (assignmentId: string) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/submit`, { method: 'POST', body: '{}' }),
+  studentRuntime: (assignmentId: string) => request<{ status: Assignment['runtime_status']; expires_at: number | null; nodes: StatusNode[] }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime`),
+  studentRuntimeAction: (assignmentId: string, action: 'up' | 'down' | 'verify') => request<{ ok: boolean; action: string; exit_code: number; output: string }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime/${action}`, { method: 'POST', body: '{}' }),
+  studentTerminal: (assignmentId: string, node: string, command: string[]) => request<{ ok: boolean; output: string; exit_code: number }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime/nodes/${encodeURIComponent(node)}/terminal`, { method: 'POST', body: JSON.stringify({ command }) }),
   topology: () => request<{ topology: Topology }>('/api/topology'),
   status: () => request<{ nodes: StatusNode[] }>('/api/status'),
   logs: () => request<{ logs: string[] }>('/api/logs'),
@@ -161,4 +176,14 @@ export const api = {
   import: (topology: Topology) => request<{ topology: Topology }>('/api/laboratories/import', { method: 'POST', body: JSON.stringify({ topology }) }),
   action: (name: 'up' | 'down' | 'verify') => request<{ ok: boolean; exit_code: number }>(`/api/${name}`, { method: 'POST', body: '{}' }),
   terminal: (node: string, command: string[]) => request<{ ok: boolean; output: string; exit_code: number }>(`/api/nodes/${encodeURIComponent(node)}/terminal`, { method: 'POST', body: JSON.stringify({ command }) }),
+  laboratories: () => request<{ laboratories: Laboratory[] }>('/api/laboratories'),
+  laboratory: (id: string) => request<{ laboratory: Laboratory; topology: Topology }>(`/api/laboratories/${encodeURIComponent(id)}`),
+  createLaboratory: (topology: Topology) => request<{ laboratory: Laboratory; topology: Topology }>('/api/laboratories', { method: 'POST', body: JSON.stringify({ topology }) }),
+  saveLaboratory: (id: string, topology: Topology) => request<{ topology: Topology }>(`/api/laboratories/${encodeURIComponent(id)}/topology`, { method: 'PUT', body: JSON.stringify({ topology }) }),
+  laboratoryStatus: (id: string) => request<{ nodes: StatusNode[] }>(`/api/laboratories/${encodeURIComponent(id)}/status`),
+  laboratoryLogs: (id: string) => request<{ logs: Array<{ message: string; created_at: number }> }>(`/api/laboratories/${encodeURIComponent(id)}/logs`),
+  laboratoryVersions: (id: string) => request<{ lab: string; versions: VersionInfo[] }>(`/api/laboratories/${encodeURIComponent(id)}/versions`),
+  restoreLaboratory: (id: string, version: number) => request<{ topology: Topology }>(`/api/laboratories/${encodeURIComponent(id)}/versions/${version}/restore`, { method: 'POST', body: '{}' }),
+  laboratoryAction: (id: string, action: 'up' | 'down' | 'verify') => request<{ ok: boolean; exit_code: number; output: string }>(`/api/laboratories/${encodeURIComponent(id)}/actions/${action}`, { method: 'POST', body: '{}' }),
+  addLaboratoryMember: (id: string, email: string, role: 'editor' | 'viewer') => request<{ ok: boolean }>(`/api/laboratories/${encodeURIComponent(id)}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
 }

@@ -11,7 +11,9 @@ Remplacer progressivement le serveur `http.server` et l’interface JavaScript v
 - `frontend/` contient l’éditeur et consomme uniquement l’API HTTP.
 - Pour les topologies v2, l’éditeur expose directement les segments Docker, les interfaces IPv4 et les routes statiques ; la validation serveur reste l’autorité avant sauvegarde ou déploiement.
 - L’ancien serveur HTTP et l’ancienne interface vanilla ont été supprimés après validation de la stack migrée.
-- La persistance fichier JSON est conservée pour le prototype ; PostgreSQL sera ajouté quand les utilisateurs et laboratoires multiples seront introduits.
+- Les comptes, sessions, affectations et topologies courantes utilisent PostgreSQL si `NETLAB_DATABASE_URL` est défini, sinon SQLite reste disponible pour le prototype local.
+- Les versions immuables de topologie restent dans `NETLAB_DATA_DIR` ; elles ne sont pas encore partagées entre plusieurs serveurs.
+- Chaque laboratoire possède un UUID, des rôles de membre et un cycle de vie/quota persistés. Les ressources d’exécution Docker utilisent cet identifiant dans leurs labels.
 
 ## Structure cible
 

@@ -333,9 +333,36 @@ Le worker doit rester sur un réseau privé ou localhost : le token est une prem
 
 ### Étape 7 — comptes et partage pédagogique (prototype local)
 
-Le prototype inclut désormais des comptes enseignants/étudiants, des sessions locales stockées sous forme de hachages, un cookie de session `HttpOnly`, une protection CSRF, des groupes, l’affectation d’un instantané de topologie à un groupe, une copie JSON personnelle par étudiant et le suivi des remises. La base SQLite est locale dans `.netlab-data/education.sqlite3` (ou `NETLAB_EDUCATION_DB`) ; sauvegardez-la avec les données pédagogiques.
+Le prototype inclut des comptes enseignants/étudiants, des sessions locales stockées sous forme de hachages, un cookie de session `HttpOnly`, une protection CSRF, des groupes, des instantanés de topologie, des copies JSON étudiantes et le suivi des remises. SQLite reste le choix local par défaut (`.netlab-data/education.sqlite3` ou `NETLAB_EDUCATION_DB`).
 
-Les étudiants peuvent éditer/sauvegarder leur copie JSON et la remettre à l’enseignant. Ils ne peuvent pas appeler les routes du plan de contrôle Docker ni ouvrir le terminal WebSocket. **Les copies étudiantes ne sont pas encore exécutables** : il n’existe toujours pas d’isolation de conteneurs par étudiant ni de stockage multi-utilisateur cloud. Les enseignants, eux, pilotent toujours le laboratoire local unique du prototype.
+Les étudiants peuvent éditer/sauvegarder leur copie, l’exécuter dans un runtime Docker propre à l’affectation et à l’étudiant, l’arrêter, la réinitialiser et la remettre à l’enseignant. Les commandes terminal ponctuelles sont limitées (`hostname`, `uname`, `ip`, `ping`) ; le terminal interactif ne cible que les nœuds de la copie personnelle. Les quotas d’exécution/TTL sont appliqués.
+
+### Phase 3 — multi-laboratoires
+
+L’API peut utiliser PostgreSQL pour les comptes, sessions, affectations, laboratoires, membres, événements et versions immuables des topologies en définissant `NETLAB_DATABASE_URL`. Sans cette variable, SQLite local reste utilisé. Pour copier une base SQLite existante vers une base PostgreSQL vide, sauvegardez d’abord les données puis exécutez :
+
+```bash
+export NETLAB_DATABASE_URL='postgresql://netlab:mot-de-passe@127.0.0.1:5432/netlab'
+python3 -m backend.app.migrate_db --source .netlab-data/education.sqlite3
+```
+
+Le script copie les comptes, sessions, données pédagogiques et versions enregistrées en base. Les anciennes archives de topologies qui existent uniquement sous forme de fichiers dans `NETLAB_DATA_DIR` ne sont pas importées ; la topologie courante de chaque ancien laboratoire est conservée comme première version. Chaque laboratoire a un identifiant UUID, un propriétaire, des membres `editor`/`viewer`, des journaux, des opérations API et des labels Docker propres. L’éditeur permet de créer et sélectionner plusieurs laboratoires ; les déploiements peuvent coexister sans réutiliser leurs noms de conteneurs/réseaux.
+
+Les limites configurables sont `NETLAB_MAX_LABS_PER_USER` (laboratoires possédés), `NETLAB_MAX_RUNNING_LABS_PER_USER` (laboratoires possédés ou édités), `NETLAB_MAX_NODES_PER_LAB`, `NETLAB_MAX_CPU_CORES_PER_LAB`, `NETLAB_MAX_MEMORY_MB_PER_LAB`, `NETLAB_MAX_STORAGE_MB_PER_LAB` (topologie courante et versions), `NETLAB_MAX_RUNNING_CPU_CORES_PER_USER`, `NETLAB_MAX_RUNNING_MEMORY_MB_PER_USER` et `NETLAB_LAB_TTL_HOURS`. Le plan de contrôle revendique atomiquement le nettoyage pour éviter les doublons entre contrôleurs ; une revendication échouée peut être reprise après un redémarrage ou un échec du worker. Les contrôleurs réessaient au démarrage puis toutes les 60 secondes. Les limites Docker CPU/mémoire par nœud restent également appliquées.
+
+Cette phase fournit la persistance multi-laboratoires et multi-contrôleurs au niveau de la base, mais ne garantit pas la haute disponibilité de l’exécution : un contrôleur doit être actif pour lancer les nettoyages et les workers doivent partager l’accès au moteur Docker prévu.
+
+### Phase 4 — laboratoire pédagogique exécutable
+
+Chaque copie étudiante reçoit un UUID stable distinct, utilisé comme label sur ses ressources Docker. L’API limite les opérations au propriétaire de l’affectation et aux nœuds de sa copie ; les routes de laboratoires partagés restent inaccessibles aux étudiants. L’interface permet de créer/réinitialiser la copie, sauvegarder sa topologie, déployer, vérifier, ouvrir un terminal dans sa copie, arrêter puis remettre le travail. L’enseignant suit le statut pédagogique et le statut runtime. Les limites de laboratoires actifs, CPU/mémoire et durée de vie sont appliquées ; l’expiration nettoie aussi les runtimes étudiants et peut être retentée après un échec.
+
+L’éditeur étudiant utilise encore le JSON, et non l’éditeur visuel enseignant. Les opérations du worker distant restent synchrones et la haute disponibilité des workers n’est pas garantie ; essayer d’abord en local avec Docker et les images de laboratoire disponibles.
+
+Pour vérifier le flux pédagogique en local : construisez les images listées à la Phase 1, démarrez l’API et le frontend comme indiqué plus haut, puis connectez-vous comme enseignant. Créez un groupe, ajoutez un compte étudiant, affectez la topologie courante à ce groupe, puis connectez-vous comme étudiant dans une autre session navigateur. Créez la copie, déployez-la, lancez par exemple `hostname` ou `ip addr` dans le terminal, arrêtez-la, réinitialisez-la et remettez-la. Le panneau enseignant affiche le statut de remise et l’état runtime. Les tests backend couvrent également le refus de remise/reset pendant un runtime actif et le nettoyage à expiration.
+
+### Phase 5 — première tranche : DNS CoreDNS
+
+Le catalogue permet maintenant d’ajouter CoreDNS à une topologie v2. Sélectionnez le nœud CoreDNS, ajoutez des entrées DNS A dont les adresses appartiennent aux sous-réseaux du laboratoire, puis déployez. Le plan d’exécution génère une configuration CoreDNS contrôlée et la monte en lecture seule ; les conteneurs du laboratoire peuvent interroger le serveur sur le segment auquel il est connecté. Le profil n’expose pas le port 53 à l’hôte. DHCP, stockage persistant et autres services restent à intégrer séparément.
 
 Cette authentification est une première protection pour le prototype local, pas une certification ni un feu vert pour une exposition publique. Avant une mise en service, il faudra notamment HTTPS, un secret de session robuste, une politique de sauvegarde/récupération, une limitation des tentatives de connexion, un déploiement isolé du worker, des quotas, une séparation des ressources par laboratoire et une revue de sécurité.
 
@@ -456,9 +483,9 @@ Cette étape est couverte par le moteur v2 et le scénario `topology.json`. Les 
 
 #### Première tranche locale
 
-Le catalogue `GET /api/services` décrit les images, catégories, ports, ressources, variables d’environnement et contraintes. Dans cette première tranche, seuls **Nginx** et **Apache HTTP Server** sont ajoutables/déployables depuis le catalogue. Les conteneurs ont des limites par défaut (512 Mo, 0,5 CPU et 128 processus pour ces deux profils ; 512 Mo, 1 CPU et 256 processus pour les nœuds personnalisés). Un port hôte facultatif est toujours lié à `127.0.0.1`, jamais à toutes les interfaces.
+Le catalogue `GET /api/services` décrit les images, catégories, ports, ressources, variables d’environnement et contraintes. **Nginx**, **Apache HTTP Server** et un profil **CoreDNS** sont ajoutables depuis le catalogue. Le profil CoreDNS génère un Corefile à partir d’entrées A limitées aux sous-réseaux déclarés et le monte en lecture seule ; le DNS est disponible dans les réseaux Docker du laboratoire, sans port hôte publié. Les conteneurs ont des limites CPU/mémoire/processus déclarées au catalogue. Un port hôte facultatif est toujours lié à `127.0.0.1`, jamais à toutes les interfaces.
 
-CoreDNS, DHCP/dnsmasq, PostgreSQL, MySQL, MongoDB, WordPress, Jenkins, GitLab et Laravel sont documentés dans le catalogue mais marqués **prévus** : il manque notamment le stockage persistant, la gestion des secrets, la configuration réseau adaptée ou des limites de ressources dédiées. pfSense, MikroTik CHR et Windows Server/Active Directory restent au stade d’étude VM/KVM et de vérification de licence. Les topologies v2 créent maintenant des segments Docker isolés ; l’éditeur permet aussi de configurer les sous-réseaux, interfaces, adresses IPv4, routes statiques et le mode routeur avant sauvegarde.
+DHCP/dnsmasq, PostgreSQL, MySQL, MongoDB, WordPress, Jenkins, GitLab et Laravel restent **prévus** : il manque notamment le stockage persistant, la gestion des secrets, la configuration réseau adaptée ou des limites de ressources dédiées. pfSense, MikroTik CHR et Windows Server/Active Directory restent au stade d’étude VM/KVM et de vérification de licence. Les topologies v2 créent maintenant des segments Docker isolés ; l’éditeur permet aussi de configurer les sous-réseaux, interfaces, adresses IPv4, routes statiques et le mode routeur avant sauvegarde.
 
 ### Étape 9 — Supervision et observabilité
 
@@ -492,9 +519,9 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Le projet est au stade du **prototype technique local**. L’idée produit et la vision long terme sont définies ; les briques couvrent désormais un laboratoire Docker multi-réseaux v2, une interface web, des comptes enseignants/étudiants, un flux élémentaire de partage pédagogique et un premier catalogue de services web. Cela ne constitue pas encore une plateforme multi-utilisateur déployable dans le cloud.
+Le projet reste un **prototype**, mais les phases 1 et 2 sont opérationnelles et une première tranche de la phase 3 est en place : comptes, laboratoires UUID séparés, membres et rôles, exécution Docker par laboratoire, limites CPU/mémoire, expiration et stockage PostgreSQL optionnel. Le mode SQLite local reste disponible.
 
-La prochaine cible est l’exécution depuis l’interface web du scénario **client Ubuntu — routeur Linux — serveur Debian**, avec deux segments, des adresses IP et du routage réel. Les laboratoires multi-services, les machines virtuelles, le partage pédagogique exécutable, la supervision et le cloud viendront ensuite.
+Cela ne constitue pas encore une plateforme cloud de production : les jobs restent synchrones, la haute disponibilité des workers n’est pas achevée et l’éditeur étudiant est encore basé sur JSON. La prochaine évolution pédagogique est l’édition visuelle des copies et des modèles d’affectation prêts à l’emploi.
 
 ## Prototype technique — étape 1
 
