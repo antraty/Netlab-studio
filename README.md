@@ -259,12 +259,13 @@ netlab-studio/
 
 ### Démarrage de la stack migrée
 
-Dans un terminal, installer puis démarrer l’API :
+Dans un terminal, installer puis démarrer l’API. Le premier démarrage nécessite un jeton de configuration aléatoire ; il ne sert qu’à créer le premier compte enseignant :
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r backend/requirements.txt
+export NETLAB_BOOTSTRAP_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 uvicorn backend.app.main:app --reload --port 8000
 ```
 
@@ -276,7 +277,7 @@ npm install
 npm run dev
 ```
 
-Ouvrir ensuite `http://127.0.0.1:5173`. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
+Ouvrir ensuite `http://127.0.0.1:5173`. La page de configuration demande le jeton et crée le premier enseignant ; l’application ne propose pas d’inscription publique. Conserver ce jeton hors du dépôt et de l’historique shell, puis le supprimer de l’environnement après la création du compte. Les comptes étudiants sont créés par un enseignant avec un mot de passe initial, à transmettre séparément. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
 
 La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket et la persistance versionnée locale sont disponibles en prototype. L’étape 6 ajoute la séparation entre le plan de contrôle et le worker Docker : lorsque `NETLAB_WORKER_URL` est défini, FastAPI envoie des jobs HTTP authentifiés au worker au lieu d’accéder au moteur Docker localement. Les fichiers `.netlab-data/` décrivent la définition souhaitée des laboratoires ; l’état temporaire des conteneurs reste géré par le worker.
 
@@ -297,7 +298,15 @@ export NETLAB_WORKER_TOKEN=local-development-token
 uvicorn backend.app.main:app --reload --port 8000
 ```
 
-Le worker doit rester sur un réseau privé ou localhost : le token est une première barrière de développement, pas encore une solution cloud complète. La prochaine évolution ajoutera une file de tâches, des identités de worker, des quotas et un transport mTLS.
+Le worker doit rester sur un réseau privé ou localhost : le token est une première barrière de développement, pas encore une solution cloud complète. Il refuse maintenant les jobs lorsque `NETLAB_WORKER_TOKEN` n’est pas configuré ; définissez une valeur forte et identique sur l’API et le worker. La prochaine évolution ajoutera une file de tâches, des identités de worker, des quotas et un transport mTLS.
+
+### Étape 7 — comptes et partage pédagogique (prototype local)
+
+Le prototype inclut désormais des comptes enseignants/étudiants, des sessions locales stockées sous forme de hachages, un cookie de session `HttpOnly`, une protection CSRF, des groupes, l’affectation d’un instantané de topologie à un groupe, une copie JSON personnelle par étudiant et le suivi des remises. La base SQLite est locale dans `.netlab-data/education.sqlite3` (ou `NETLAB_EDUCATION_DB`) ; sauvegardez-la avec les données pédagogiques.
+
+Les étudiants peuvent éditer/sauvegarder leur copie JSON et la remettre à l’enseignant. Ils ne peuvent pas appeler les routes du plan de contrôle Docker ni ouvrir le terminal WebSocket. **Les copies étudiantes ne sont pas encore exécutables** : il n’existe toujours pas d’isolation de conteneurs par étudiant ni de stockage multi-utilisateur cloud. Les enseignants, eux, pilotent toujours le laboratoire local unique du prototype.
+
+Cette authentification est une première protection pour le prototype local, pas une certification ni un feu vert pour une exposition publique. Avant une mise en service, il faudra notamment HTTPS, un secret de session robuste, une politique de sauvegarde/récupération, une limitation des tentatives de connexion, un déploiement isolé du worker, des quotas, une séparation des ressources par laboratoire et une revue de sécurité.
 
 ## Sécurité et isolation
 
@@ -308,7 +317,7 @@ L’exécution de vrais systèmes implique des exigences de sécurité important
 - un contrôle strict des images et des privilèges ;
 - la restriction des accès réseau sortants et entrants ;
 - la protection des terminaux et des secrets ;
-- l’authentification et la gestion des rôles ;
+- le durcissement de l’authentification et la gestion avancée des rôles ;
 - la suppression propre des ressources à la fin d’un laboratoire ;
 - la traçabilité des opérations d’administration.
 
@@ -411,6 +420,12 @@ Cette étape est couverte par le prototype Docker actuel.
 - Étudier les appliances pfSense et MikroTik.
 - Étudier Windows Server et Active Directory lorsque l’infrastructure le permettra.
 
+#### Première tranche locale
+
+Le catalogue `GET /api/services` décrit les images, catégories, ports, ressources, variables d’environnement et contraintes. Dans cette première tranche, seuls **Nginx** et **Apache HTTP Server** sont ajoutables/déployables depuis le catalogue. Les conteneurs ont des limites par défaut (512 Mo, 0,5 CPU et 128 processus pour ces deux profils ; 512 Mo, 1 CPU et 256 processus pour les nœuds personnalisés). Un port hôte facultatif est toujours lié à `127.0.0.1`, jamais à toutes les interfaces.
+
+CoreDNS, DHCP/dnsmasq, PostgreSQL, MySQL, MongoDB, WordPress, Jenkins, GitLab et Laravel sont documentés dans le catalogue mais marqués **prévus** : il manque notamment le stockage persistant, la gestion des secrets, la configuration réseau adaptée ou des limites de ressources dédiées. pfSense, MikroTik CHR et Windows Server/Active Directory restent au stade d’étude VM/KVM et de vérification de licence. Les liens de topologie restent graphiques et le prototype ne doit pas être exposé publiquement.
+
 ### Étape 9 — Supervision et observabilité
 
 - Afficher les utilisateurs, nœuds, réseaux, logs et erreurs.
@@ -437,7 +452,7 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Le projet est au stade du **prototype technique**. L’idée produit et la vision long terme sont définies ; les premières briques exécutables couvrent actuellement un laboratoire Docker local composé d’un client Ubuntu et d’un serveur Debian, ainsi qu’une interface web locale de contrôle.
+Le projet est au stade du **prototype technique local**. L’idée produit et la vision long terme sont définies ; les briques couvrent un laboratoire Docker local, une interface web, des comptes enseignants/étudiants, un flux élémentaire de partage pédagogique et un premier catalogue de services web. Cela ne constitue pas encore une plateforme multi-utilisateur déployable dans le cloud.
 
 La cible reste plus large : **un client Ubuntu et un serveur Debian reliés dans un réseau Docker, déployables depuis une interface web et accessibles via des terminaux dans le navigateur**, puis des laboratoires multi-services, des machines virtuelles, le partage pédagogique, la supervision et l’exécution dans le cloud.
 
@@ -457,12 +472,13 @@ Voir [PROTOTYPE.md](PROTOTYPE.md) pour les prérequis, le format de topologie et
 Les étapes 2 et 3 sont maintenant portées par FastAPI et Vue :
 
 ```bash
+export NETLAB_BOOTSTRAP_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 uvicorn backend.app.main:app --reload --port 8000
 # dans un second terminal : cd frontend && npm run dev
 ```
 
 Puis ouvrir `http://127.0.0.1:5173` pour piloter le laboratoire, consulter les états et les journaux, et éditer la topologie.
 
-L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Cette fonction est actuellement réservée au prototype local : l’authentification, les quotas et l’isolation cloud doivent être ajoutés avant toute exposition publique.
+L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Elle est réservée au compte enseignant dans le prototype local. Elle n’est pas conçue pour une exposition publique ; les quotas, l’isolation cloud et une revue de sécurité restent nécessaires.
 
 L’éditeur visuel initial est également disponible : les nœuds peuvent être déplacés, ajoutés, supprimés ou reliés, puis sauvegardés dans la topologie JSON. Ces liens sont d’abord graphiques ; leur traduction en réseaux et interfaces Docker isolés sera ajoutée au plan d’exécution.

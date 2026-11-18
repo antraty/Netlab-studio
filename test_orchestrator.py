@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from orchestrator import DockerOrchestrator
 from netlab import TopologyError, load_topology
 
@@ -24,6 +26,20 @@ class OrchestratorTests(unittest.TestCase):
         invalid["nodes"] = []
         with self.assertRaises(TopologyError):
             DockerOrchestrator(invalid)
+
+    def test_worker_refuses_jobs_without_a_configured_token(self):
+        import worker.main as worker_main
+
+        previous = worker_main.TOKEN
+        try:
+            worker_main.TOKEN = ""
+            with self.assertRaises(HTTPException) as caught:
+                worker_main.require_token(None)
+            self.assertEqual(caught.exception.status_code, 503)
+            worker_main.TOKEN = "test-worker-token"
+            worker_main.require_token("Bearer test-worker-token")
+        finally:
+            worker_main.TOKEN = previous
 
 
 if __name__ == "__main__":

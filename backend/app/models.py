@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .services import validate_catalog_node
+
 
 class Position(BaseModel):
     x: float = 100
@@ -21,6 +23,8 @@ class Node(BaseModel):
     image: str
     command: list[str] = Field(default_factory=lambda: ["sleep", "infinity"])
     position: Position = Field(default_factory=Position)
+    service_id: str | None = None
+    published_port: int | None = Field(default=None, ge=1, le=65535)
 
     @field_validator("name", "image")
     @classmethod
@@ -69,6 +73,13 @@ class Topology(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError("node names must be unique")
         known = set(names)
+        host_ports: set[int] = set()
+        for node in self.nodes:
+            validate_catalog_node(node.service_id, node.image, node.command, node.published_port)
+            if node.published_port is not None:
+                if node.published_port in host_ports:
+                    raise ValueError("published host ports must be unique in a topology")
+                host_ports.add(node.published_port)
         if self.network.driver != "bridge":
             raise ValueError("prototype only supports the bridge network driver")
         if self.connectivity_check.from_node not in known or self.connectivity_check.to_node not in known:
@@ -83,7 +94,7 @@ class Topology(BaseModel):
         return self
 
     def to_topology_dict(self) -> dict[str, Any]:
-        return self.model_dump(by_alias=True)
+        return self.model_dump(by_alias=True, exclude_none=True)
 
 
 class TopologyEnvelope(BaseModel):
