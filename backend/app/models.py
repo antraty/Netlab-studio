@@ -202,7 +202,14 @@ class TopologyEnvelope(BaseModel):
 
 
 class TerminalRequest(BaseModel):
-    command: list[str]
+    command: list[str] = Field(min_length=1, max_length=8)
+
+    @field_validator("command")
+    @classmethod
+    def bounded_command(cls, value: list[str]) -> list[str]:
+        if any(len(argument) > 256 for argument in value) or sum(map(len, value)) > 4096:
+            raise ValueError("terminal command arguments exceed the size limit")
+        return value
 
 
 class VersionInfo(BaseModel):

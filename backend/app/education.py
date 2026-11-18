@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 import hashlib
 import hmac
 import json
@@ -22,6 +23,10 @@ from pydantic import BaseModel, Field, field_validator
 
 import netlab
 from .services import get_service
+from .security import production_mode, validate_production_settings
+
+if production_mode():
+    validate_production_settings()
 
 SESSION_COOKIE = "netlab_session"
 CSRF_COOKIE = "netlab_csrf"
@@ -101,6 +106,9 @@ def verify_password(password: str, encoded: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False
+
+
+_DUMMY_PASSWORD_HASH = hash_password("invalid-account-password-placeholder")
 
 
 def _token_hash(token: str) -> str:
@@ -202,6 +210,12 @@ class EducationStore:
                     csrf_hash TEXT NOT NULL,
                     expires_at DOUBLE PRECISION NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS auth_login_attempts (
+                    key_hash TEXT PRIMARY KEY,
+                    failures INTEGER NOT NULL,
+                    window_started_at DOUBLE PRECISION NOT NULL,
+                    blocked_until DOUBLE PRECISION
+                );
                 CREATE TABLE IF NOT EXISTS groups (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -223,6 +237,11 @@ class EducationStore:
                     topology_json TEXT NOT NULL,
                     created_at DOUBLE PRECISION NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS assignment_details (
+                    assignment_id TEXT PRIMARY KEY REFERENCES assignments(id) ON DELETE CASCADE,
+                    instructions TEXT NOT NULL DEFAULT '',
+                    criteria_json TEXT NOT NULL DEFAULT '[]'
+                );
                 CREATE TABLE IF NOT EXISTS student_labs (
                     assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
                     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -239,6 +258,20 @@ class EducationStore:
                     updated_at DOUBLE PRECISION NOT NULL,
                     expires_at DOUBLE PRECISION,
                     PRIMARY KEY (assignment_id, user_id),
+                    FOREIGN KEY (assignment_id, user_id)
+                        REFERENCES student_labs(assignment_id, user_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS student_submission_attempts (
+                    id TEXT PRIMARY KEY,
+                    assignment_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    topology_json TEXT NOT NULL,
+                    submitted_at DOUBLE PRECISION NOT NULL,
+                    feedback TEXT,
+                    reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    reviewed_at DOUBLE PRECISION,
+                    UNIQUE(assignment_id, user_id, attempt),
                     FOREIGN KEY (assignment_id, user_id)
                         REFERENCES student_labs(assignment_id, user_id) ON DELETE CASCADE
                 );
@@ -276,8 +309,10 @@ class EducationStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_groups_teacher ON groups(teacher_id);
                 CREATE INDEX IF NOT EXISTS idx_members_user ON group_members(user_id);
+                CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_window ON auth_login_attempts(window_started_at);
                 CREATE INDEX IF NOT EXISTS idx_assignments_group ON assignments(group_id);
                 CREATE INDEX IF NOT EXISTS idx_student_runtime_expiry ON student_lab_runtime(status, expires_at);
+                CREATE INDEX IF NOT EXISTS idx_student_submissions ON student_submission_attempts(assignment_id,user_id,attempt);
                 CREATE INDEX IF NOT EXISTS idx_laboratories_owner ON laboratories(owner_id);
                 CREATE INDEX IF NOT EXISTS idx_laboratories_expiry ON laboratories(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_laboratory_versions_lab ON laboratory_versions(laboratory_id, version);
@@ -338,7 +373,9 @@ class EducationStore:
     def authenticate(self, email: str, password: str) -> dict[str, str] | None:
         with self._connect() as db:
             row = db.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
-        if not row or not verify_password(password, row["password_hash"]):
+        password_hash = row["password_hash"] if row else _DUMMY_PASSWORD_HASH
+        password_matches = verify_password(password, password_hash)
+        if not row or not password_matches:
             return None
         return self.public_user(row)
 
@@ -373,6 +410,48 @@ class EducationStore:
         if token:
             with self._connect() as db:
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))
+
+    def login_throttle_remaining(self, keys: list[str]) -> int:
+        now = time.time()
+        with self._connect() as db:
+            for key in keys:
+                row = db.execute(
+                    "SELECT blocked_until FROM auth_login_attempts WHERE key_hash=?",
+                    (_token_hash(key),),
+                ).fetchone()
+                if row and row["blocked_until"] is not None and float(row["blocked_until"]) > now:
+                    return max(1, math.ceil(float(row["blocked_until"]) - now))
+        return 0
+
+    def record_login_failure(self, keys: list[str]) -> None:
+        now = time.time()
+        window_start = now - LOGIN_WINDOW_SECONDS
+        blocked_until = now + LOGIN_WINDOW_SECONDS
+        for key in keys:
+            with self._connect() as db:
+                db.execute(
+                    "DELETE FROM auth_login_attempts WHERE window_started_at<=? "
+                    "AND (blocked_until IS NULL OR blocked_until<=?)",
+                    (window_start, now),
+                )
+                db.execute(
+                    "INSERT INTO auth_login_attempts(key_hash,failures,window_started_at,blocked_until) "
+                    "VALUES(?,1,?,NULL) ON CONFLICT(key_hash) DO UPDATE SET "
+                    "failures=CASE WHEN auth_login_attempts.window_started_at<=? THEN 1 ELSE auth_login_attempts.failures+1 END,"
+                    "window_started_at=CASE WHEN auth_login_attempts.window_started_at<=? THEN excluded.window_started_at "
+                    "ELSE auth_login_attempts.window_started_at END,"
+                    "blocked_until=CASE WHEN (CASE WHEN auth_login_attempts.window_started_at<=? THEN 1 "
+                    "ELSE auth_login_attempts.failures+1 END)>=? THEN ? ELSE NULL END",
+                    (
+                        _token_hash(key), now, window_start, window_start, window_start,
+                        LOGIN_MAX_FAILURES, blocked_until,
+                    ),
+                )
+
+    def clear_login_failures(self, keys: list[str]) -> None:
+        with self._connect() as db:
+            for key in keys:
+                db.execute("DELETE FROM auth_login_attempts WHERE key_hash=?", (_token_hash(key),))
 
     def change_password(self, user_id: str, old_password: str, new_password: str) -> None:
         new_password = _password(new_password)
@@ -890,16 +969,34 @@ class EducationStore:
                 (user["id"], time.time(), group_id, user["id"]),
             )
 
-    def create_assignment(self, teacher_id: str, group_id: str, title: str, topology: dict[str, Any]) -> dict[str, Any]:
+    def create_assignment(
+        self,
+        teacher_id: str,
+        group_id: str,
+        title: str,
+        topology: dict[str, Any],
+        instructions: str = "",
+        criteria: list[str] | None = None,
+    ) -> dict[str, Any]:
         title = title.strip()
         if not title or len(title) > 120:
             raise EducationError("assignment title must contain 1 to 120 characters")
+        instructions = instructions.strip()
+        if len(instructions) > 5000:
+            raise EducationError("assignment instructions must not exceed 5000 characters")
+        criteria = [item.strip() for item in (criteria or []) if item.strip()]
+        if len(criteria) > 20 or any(len(item) > 300 for item in criteria):
+            raise EducationError("assignment criteria allow up to 20 items of 300 characters")
         topology = dict(topology)
         topology.pop("laboratory_id", None)
         try:
             netlab.validate_topology(topology)
         except (netlab.TopologyError, TypeError, KeyError) as exc:
             raise EducationError(f"invalid topology: {exc}") from exc
+        max_nodes = self._quota("NETLAB_MAX_NODES_PER_LAB", 20, 200)
+        if len(topology["nodes"]) > max_nodes:
+            raise EducationError(f"laboratory exceeds the {max_nodes}-node quota")
+        self._check_laboratory_resources(topology)
         assignment_id = str(uuid.uuid4())
         created_at = time.time()
         snapshot = json.dumps(topology, separators=(",", ":"), ensure_ascii=False)
@@ -912,18 +1009,33 @@ class EducationStore:
                 (assignment_id, group_id, teacher_id, title, snapshot, created_at),
             )
             db.execute(
+                "INSERT INTO assignment_details(assignment_id,instructions,criteria_json) VALUES(?,?,?)",
+                (assignment_id, instructions, json.dumps(criteria, ensure_ascii=False)),
+            )
+            db.execute(
                 "INSERT INTO student_labs(assignment_id,user_id,topology_json,status,updated_at) "
                 "SELECT ?,user_id,?,'assigned',? FROM group_members WHERE group_id=?",
                 (assignment_id, snapshot, created_at, group_id),
             )
-        return {"id": assignment_id, "group_id": group_id, "title": title, "created_at": created_at}
+        return {
+            "id": assignment_id,
+            "group_id": group_id,
+            "title": title,
+            "created_at": created_at,
+            "instructions": instructions,
+            "criteria": criteria,
+        }
 
     def assignments_for_student(self, student_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT a.id,a.title,a.created_at,g.name AS group_name,sl.status,sl.topology_json,sl.submitted_at,"
-                "COALESCE(sr.status,'stopped') AS runtime_status "
+                "COALESCE(sr.status,'stopped') AS runtime_status,COALESCE(d.instructions,'') AS instructions,"
+                "COALESCE(d.criteria_json,'[]') AS criteria_json,"
+                "(SELECT COUNT(*) FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id) AS attempt_count,"
+                "(SELECT sa.feedback FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS feedback "
                 "FROM student_labs sl JOIN assignments a ON a.id=sl.assignment_id JOIN groups g ON g.id=a.group_id "
+                "LEFT JOIN assignment_details d ON d.assignment_id=a.id "
                 "LEFT JOIN student_lab_runtime sr ON sr.assignment_id=sl.assignment_id AND sr.user_id=sl.user_id "
                 "WHERE sl.user_id=? ORDER BY a.created_at DESC",
                 (student_id,),
@@ -935,6 +1047,11 @@ class EducationStore:
         result = {key: row[key] for key in ("id", "title", "created_at", "group_name", "status", "submitted_at")}
         if "runtime_status" in row.keys():
             result["runtime_status"] = row["runtime_status"]
+        if "instructions" in row.keys():
+            result["instructions"] = row["instructions"]
+            result["criteria"] = json.loads(row["criteria_json"])
+            result["attempt_count"] = row["attempt_count"]
+            result["feedback"] = row["feedback"]
         if include_topology:
             result["topology"] = json.loads(row["topology_json"])
         return result
@@ -1041,6 +1158,39 @@ class EducationStore:
             laboratory_id, expected_name = self._student_laboratory_identity(assignment_id, student_id, template)
             if topology.get("laboratory_id") != laboratory_id or topology["lab"] != expected_name:
                 raise EducationError("student laboratory identity cannot be changed")
+            expected_topology = deepcopy(template)
+            expected_topology["laboratory_id"] = laboratory_id
+            expected_topology["lab"] = expected_name
+            candidate_nodes = {node.get("name"): node for node in topology.get("nodes", []) if isinstance(node, dict)}
+            if len(candidate_nodes) != len(expected_topology["nodes"]):
+                raise EducationError("student copies may not add or remove nodes")
+            for expected_node in expected_topology["nodes"]:
+                candidate_node = candidate_nodes.get(expected_node["name"])
+                if not candidate_node:
+                    raise EducationError("student copies may not rename nodes")
+                original_interfaces = expected_node.get("interfaces", [])
+                candidate_interfaces = candidate_node.get("interfaces", [])
+                if len(original_interfaces) != len(candidate_interfaces):
+                    raise EducationError("student copies may not add or remove interfaces")
+                for original_interface, candidate_interface in zip(original_interfaces, candidate_interfaces):
+                    if (
+                        original_interface.get("name") != candidate_interface.get("name")
+                        or original_interface.get("network") != candidate_interface.get("network")
+                    ):
+                        raise EducationError("student copies may not change interface or network assignments")
+                    for field in ("ipv4", "gateway"):
+                        if field in candidate_interface:
+                            original_interface[field] = candidate_interface[field]
+                        else:
+                            original_interface.pop(field, None)
+                routes = candidate_node.get("routes", [])
+                if not isinstance(routes, list) or len(routes) > 64:
+                    raise EducationError("student copies may contain at most 64 static routes per node")
+                if "routes" in expected_node or "routes" in candidate_node:
+                    expected_node["routes"] = routes
+                    candidate_node["routes"] = routes
+            if topology != expected_topology:
+                raise EducationError("students may only edit interface IPv4/gateways and static routes")
             if len(topology["nodes"]) > self._quota("NETLAB_MAX_NODES_PER_LAB", 20, 200):
                 raise EducationError("laboratory exceeds the node quota")
             self._check_laboratory_resources(topology)
@@ -1064,12 +1214,127 @@ class EducationStore:
             ).fetchone()
             if runtime and runtime["status"] in {"running", "failed"}:
                 raise EducationError("clean up the student laboratory before submitting it")
+            row = db.execute(
+                "SELECT sl.topology_json,a.topology_json AS template_json FROM student_labs sl "
+                "JOIN assignments a ON a.id=sl.assignment_id WHERE sl.assignment_id=? AND sl.user_id=?",
+                (assignment_id, student_id),
+            ).fetchone()
+            if not row:
+                raise EducationError("assignment not found")
+            topology = json.loads(row["topology_json"])
+            if not topology.get("laboratory_id"):
+                raise EducationError("create your isolated copy before submitting it")
+            expected_id, expected_name = self._student_laboratory_identity(
+                assignment_id, student_id, json.loads(row["template_json"]),
+            )
+            if topology.get("laboratory_id") != expected_id or topology.get("lab") != expected_name:
+                raise EducationError("student laboratory identity is invalid")
+            attempt = int(db.execute(
+                "SELECT COALESCE(MAX(attempt),0)+1 AS attempt FROM student_submission_attempts "
+                "WHERE assignment_id=? AND user_id=?",
+                (assignment_id, student_id),
+            ).fetchone()["attempt"])
+            submitted_at = time.time()
+            db.execute(
+                "INSERT INTO student_submission_attempts(id,assignment_id,user_id,attempt,topology_json,submitted_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    str(uuid.uuid4()), assignment_id, student_id, attempt,
+                    row["topology_json"], submitted_at,
+                ),
+            )
+            db.execute(
+                "UPDATE student_labs SET status='submitted',submitted_at=?,updated_at=? "
+                "WHERE assignment_id=? AND user_id=?",
+                (submitted_at, submitted_at, assignment_id, student_id),
+            )
+
+    def submission_history_for_student(self, student_id: str, assignment_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            assignment = db.execute(
+                "SELECT 1 FROM student_labs WHERE assignment_id=? AND user_id=?",
+                (assignment_id, student_id),
+            ).fetchone()
+            if not assignment:
+                raise EducationError("assignment not found")
+            rows = db.execute(
+                "SELECT id,attempt,topology_json,submitted_at,feedback,reviewed_at "
+                "FROM student_submission_attempts WHERE assignment_id=? AND user_id=? ORDER BY attempt DESC",
+                (assignment_id, student_id),
+            )
+            return [
+                {
+                    "id": row["id"],
+                    "attempt": row["attempt"],
+                    "topology": json.loads(row["topology_json"]),
+                    "submitted_at": row["submitted_at"],
+                    "feedback": row["feedback"],
+                    "reviewed_at": row["reviewed_at"],
+                }
+                for row in rows
+            ]
+
+    def submission_history_for_teacher(
+        self, teacher_id: str, assignment_id: str, student_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            assignment = db.execute(
+                "SELECT a.group_id FROM assignments a JOIN groups g ON g.id=a.group_id "
+                "WHERE a.id=? AND g.teacher_id=?",
+                (assignment_id, teacher_id),
+            ).fetchone()
+            if not assignment:
+                raise EducationError("assignment not found")
+            rows = db.execute(
+                "SELECT sa.id,sa.attempt,sa.topology_json,sa.submitted_at,sa.feedback,sa.reviewed_at,"
+                "reviewer.display_name AS reviewed_by "
+                "FROM student_submission_attempts sa "
+                "JOIN group_members gm ON gm.group_id=? AND gm.user_id=sa.user_id "
+                "LEFT JOIN users reviewer ON reviewer.id=sa.reviewed_by "
+                "WHERE sa.assignment_id=? AND sa.user_id=? ORDER BY sa.attempt DESC",
+                (assignment["group_id"], assignment_id, student_id),
+            )
+            history = [
+                {
+                    "id": row["id"],
+                    "attempt": row["attempt"],
+                    "topology": json.loads(row["topology_json"]),
+                    "submitted_at": row["submitted_at"],
+                    "feedback": row["feedback"],
+                    "reviewed_at": row["reviewed_at"],
+                    "reviewed_by": row["reviewed_by"],
+                }
+                for row in rows
+            ]
+            if not history:
+                member = db.execute(
+                    "SELECT 1 FROM student_labs WHERE assignment_id=? AND user_id=?",
+                    (assignment_id, student_id),
+                ).fetchone()
+                if not member:
+                    raise EducationError("student assignment not found")
+            return history
+
+    def review_submission(
+        self, teacher_id: str, assignment_id: str, student_id: str, submission_id: str, feedback: str,
+    ) -> None:
+        feedback = feedback.strip()
+        if not feedback or len(feedback) > 4000:
+            raise EducationError("feedback must contain 1 to 4000 characters")
+        with self._connect() as db:
             result = db.execute(
-                "UPDATE student_labs SET status='submitted',submitted_at=?,updated_at=? WHERE assignment_id=? AND user_id=?",
-                (time.time(), time.time(), assignment_id, student_id),
+                "UPDATE student_submission_attempts SET feedback=?,reviewed_by=?,reviewed_at=? "
+                "WHERE id=? AND assignment_id=? AND user_id=? AND EXISTS ("
+                "SELECT 1 FROM assignments a JOIN groups g ON g.id=a.group_id "
+                "JOIN group_members gm ON gm.group_id=g.id AND gm.user_id=? "
+                "WHERE a.id=? AND g.teacher_id=? AND student_submission_attempts.assignment_id=a.id)",
+                (
+                    feedback, teacher_id, time.time(), submission_id, assignment_id, student_id,
+                    student_id, assignment_id, teacher_id,
+                ),
             )
             if result.rowcount == 0:
-                raise EducationError("assignment not found")
+                raise EducationError("submission not found")
 
     def claim_student_laboratory_run(self, student_id: str, assignment_id: str) -> dict[str, Any]:
         max_running = self._quota("NETLAB_MAX_RUNNING_LABS_PER_USER", 2, 100)
@@ -1151,8 +1416,10 @@ class EducationStore:
             if not group:
                 raise EducationError("group not found")
             return [dict(row) for row in db.execute(
-                "SELECT a.id AS assignment_id,a.title,u.email,u.display_name,sl.status,sl.updated_at,sl.submitted_at,"
-                "COALESCE(sr.status,'stopped') AS runtime_status "
+                "SELECT a.id AS assignment_id,a.title,u.id AS student_id,u.email,u.display_name,sl.status,sl.updated_at,sl.submitted_at,"
+                "COALESCE(sr.status,'stopped') AS runtime_status,"
+                "(SELECT COUNT(*) FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id) AS attempt_count,"
+                "(SELECT sa.feedback FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS feedback "
                 "FROM assignments a JOIN student_labs sl ON sl.assignment_id=a.id JOIN users u ON u.id=sl.user_id "
                 "LEFT JOIN student_lab_runtime sr ON sr.assignment_id=sl.assignment_id AND sr.user_id=sl.user_id "
                 "WHERE a.group_id=? ORDER BY a.created_at DESC,u.display_name COLLATE NOCASE",
@@ -1185,6 +1452,13 @@ class BootstrapRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("email")
+    @classmethod
+    def bounded_email(cls, value: str) -> str:
+        if len(value) > 254:
+            raise ValueError("email is too long")
+        return value
 
 
 class CreateStudentRequest(BaseModel):
@@ -1222,12 +1496,18 @@ class AddMemberRequest(BaseModel):
 
 
 class AssignmentRequest(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=120)
     topology: dict[str, Any]
+    instructions: str = Field(default="", max_length=5000)
+    criteria: list[str] = Field(default_factory=list, max_length=20)
 
 
 class SaveTopologyRequest(BaseModel):
     topology: dict[str, Any]
+
+
+class SubmissionFeedbackRequest(BaseModel):
+    feedback: str = Field(min_length=1, max_length=4000)
 
 
 def require_user(request: Request) -> dict[str, str]:
@@ -1252,14 +1532,14 @@ def require_teacher(user: dict[str, str] = Depends(require_user)) -> dict[str, s
 
 def _set_session(response: Response, user_id: str) -> str:
     token, csrf = store.create_session(user_id)
-    secure = os.getenv("NETLAB_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+    secure = production_mode() or os.getenv("NETLAB_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
     response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=secure, samesite="strict", max_age=SESSION_TTL_SECONDS, path="/")
     response.set_cookie(CSRF_COOKIE, csrf, httponly=False, secure=secure, samesite="strict", max_age=SESSION_TTL_SECONDS, path="/")
     return csrf
 
 
 def _clear_session(response: Response) -> None:
-    secure = os.getenv("NETLAB_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+    secure = production_mode() or os.getenv("NETLAB_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
     response.delete_cookie(SESSION_COOKIE, httponly=True, secure=secure, samesite="strict", path="/")
     response.delete_cookie(CSRF_COOKIE, httponly=False, secure=secure, samesite="strict", path="/")
 
@@ -1293,15 +1573,27 @@ def bootstrap(request: BootstrapRequest, response: Response, http_request: Reque
 
 @router.post("/auth/login")
 def login(request: LoginRequest, response: Response, http_request: Request) -> dict[str, Any]:
-    throttle_key = f"login:{http_request.client.host if http_request.client else 'unknown'}"
-    retry_after = login_throttle.blocked(throttle_key)
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    throttle_key = f"login:{client_ip}"
+    persistent_keys = [f"ip:{client_ip}", f"email:{request.email.strip().lower()}"]
+    retry_after = (
+        store.login_throttle_remaining(persistent_keys)
+        if production_mode()
+        else login_throttle.blocked(throttle_key)
+    )
     if retry_after:
         raise HTTPException(status_code=429, detail="too many login attempts; retry later", headers={"Retry-After": str(retry_after)})
     user = store.authenticate(request.email, request.password)
     if not user:
-        login_throttle.failure(throttle_key)
+        if production_mode():
+            store.record_login_failure(persistent_keys)
+        else:
+            login_throttle.failure(throttle_key)
         raise HTTPException(status_code=401, detail="invalid email or password")
-    login_throttle.success(throttle_key)
+    if production_mode():
+        store.clear_login_failures(persistent_keys)
+    else:
+        login_throttle.success(throttle_key)
     csrf = _set_session(response, user["id"])
     return {"user": user, "csrf_token": csrf}
 
@@ -1365,7 +1657,10 @@ def add_group_member(group_id: str, request: AddMemberRequest, teacher: dict[str
 @router.post("/education/groups/{group_id}/assignments", status_code=201)
 def create_assignment(group_id: str, request: AssignmentRequest, teacher: dict[str, str] = Depends(require_teacher)) -> dict[str, Any]:
     try:
-        assignment = store.create_assignment(teacher["id"], group_id, request.title, request.topology)
+        assignment = store.create_assignment(
+            teacher["id"], group_id, request.title, request.topology,
+            request.instructions, request.criteria,
+        )
     except EducationError as exc:
         raise HTTPException(status_code=404 if str(exc) == "group not found" else 400, detail=str(exc)) from exc
     return {"assignment": assignment}
@@ -1377,6 +1672,33 @@ def group_submissions(group_id: str, teacher: dict[str, str] = Depends(require_t
         return {"submissions": store.submissions(teacher["id"], group_id)}
     except EducationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/education/assignments/{assignment_id}/students/{student_id}/submissions")
+def student_submission_history(
+    assignment_id: str,
+    student_id: str,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        return {"submissions": store.submission_history_for_teacher(teacher["id"], assignment_id, student_id)}
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/education/assignments/{assignment_id}/students/{student_id}/submissions/{submission_id}/feedback")
+def review_student_submission(
+    assignment_id: str,
+    student_id: str,
+    submission_id: str,
+    request: SubmissionFeedbackRequest,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, bool]:
+    try:
+        store.review_submission(teacher["id"], assignment_id, student_id, submission_id, request.feedback)
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @router.get("/education/my-assignments")
@@ -1417,6 +1739,19 @@ def submit_assignment(assignment_id: str, student: dict[str, str] = Depends(requ
     except EducationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@router.get("/education/my-assignments/{assignment_id}/submissions")
+def my_submission_history(
+    assignment_id: str,
+    student: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    if student["role"] != "student":
+        raise HTTPException(status_code=403, detail="student role required")
+    try:
+        return {"submissions": store.submission_history_for_student(student["id"], assignment_id)}
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def authenticate_websocket(cookie: str | None) -> dict[str, str] | None:

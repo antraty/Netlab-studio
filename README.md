@@ -352,13 +352,15 @@ Les limites configurables sont `NETLAB_MAX_LABS_PER_USER` (laboratoires posséd�
 
 Cette phase fournit la persistance multi-laboratoires et multi-contrôleurs au niveau de la base, mais ne garantit pas la haute disponibilité de l’exécution : un contrôleur doit être actif pour lancer les nettoyages et les workers doivent partager l’accès au moteur Docker prévu.
 
-### Phase 4 — laboratoire pédagogique exécutable
+### Phase 4 — pédagogie réelle : TP exécutables par étudiant
 
-Chaque copie étudiante reçoit un UUID stable distinct, utilisé comme label sur ses ressources Docker. L’API limite les opérations au propriétaire de l’affectation et aux nœuds de sa copie ; les routes de laboratoires partagés restent inaccessibles aux étudiants. L’interface permet de créer/réinitialiser la copie, sauvegarder sa topologie, déployer, vérifier, ouvrir un terminal dans sa copie, arrêter puis remettre le travail. L’enseignant suit le statut pédagogique et le statut runtime. Les limites de laboratoires actifs, CPU/mémoire et durée de vie sont appliquées ; l’expiration nettoie aussi les runtimes étudiants et peut être retentée après un échec.
+L’enseignant peut affecter au groupe la topologie courante ou un modèle LAN/routage prédéfini, ajouter des consignes et des critères de réussite. Chaque étudiant reçoit une copie isolée avec son propre UUID Docker. Il peut modifier visuellement les adresses IPv4, passerelles et routes statiques, sauvegarder, déployer, vérifier la connectivité, utiliser le terminal autorisé, arrêter ou réinitialiser son runtime et remettre son travail.
 
-L’éditeur étudiant utilise encore le JSON, et non l’éditeur visuel enseignant. Les opérations du worker distant restent synchrones et la haute disponibilité des workers n’est pas garantie ; essayer d’abord en local avec Docker et les images de laboratoire disponibles.
+Chaque remise est conservée comme une tentative numérotée avec un instantané immuable de la topologie. L’enseignant peut consulter les tentatives et leur instantané, puis transmettre un commentaire sur une tentative précise ; l’étudiant retrouve ses remises et les retours dans son espace. Les limites CPU/mémoire et la durée de vie restent appliquées ; l’expiration nettoie les runtimes étudiants. Les tests vérifient que deux étudiants d’un même groupe possèdent des copies indépendantes et que l’historique et les commentaires ne sont pas accessibles à un autre étudiant.
 
-Pour vérifier le flux pédagogique en local : construisez les images listées à la Phase 1, démarrez l’API et le frontend comme indiqué plus haut, puis connectez-vous comme enseignant. Créez un groupe, ajoutez un compte étudiant, affectez la topologie courante à ce groupe, puis connectez-vous comme étudiant dans une autre session navigateur. Créez la copie, déployez-la, lancez par exemple `hostname` ou `ip addr` dans le terminal, arrêtez-la, réinitialisez-la et remettez-la. Le panneau enseignant affiche le statut de remise et l’état runtime. Les tests backend couvrent également le refus de remise/reset pendant un runtime actif et le nettoyage à expiration.
+Pour tester : construisez les images listées à la Phase 1, démarrez l’API et le frontend, puis connectez-vous comme enseignant. Créez un groupe avec deux comptes étudiants et affectez un modèle avec consignes et critères. Dans deux sessions navigateur distinctes, chaque étudiant modifie une IP ou une route, déploie et vérifie son TP, arrête le runtime et remet son travail. Depuis le compte enseignant, consultez les instantanés des tentatives et laissez un commentaire ; vérifiez que chacun ne voit que son propre historique et ses retours.
+
+Cette phase est maintenant complète pour le flux pédagogique local. Les opérations du worker distant restent synchrones et la haute disponibilité des workers n’est pas garantie ; le projet ne doit pas être exposé publiquement avant durcissement et revue de sécurité.
 
 ### Phase 5 — première tranche : DNS CoreDNS
 
@@ -380,6 +382,40 @@ L’exécution de vrais systèmes implique des exigences de sécurité important
 - la traçabilité des opérations d’administration.
 
 La sécurité ne doit pas être ajoutée après le MVP : elle fait partie du fonctionnement fondamental de la plateforme.
+
+### Déploiement public : configuration minimale requise
+
+Le serveur ne démarre pas en mode production si les paramètres suivants sont absents ou non sécurisés. Utilisez `.env.example` comme liste de paramètres, pas comme fichier de secrets :
+
+- Définir `NETLAB_ENV=production`, `NETLAB_COOKIE_SECURE=true`, `NETLAB_ALLOWED_ORIGINS=https://<nom-public>` et `NETLAB_ALLOWED_HOSTS=<nom-public>`.
+- Configurer `NETLAB_DATABASE_URL` vers PostgreSQL avec `sslmode=require` ou `verify-full`. Sauvegardes chiffrées, restauration testée et gestion des secrets sont à opérer hors de l’application.
+- Déployer le worker sur une adresse privée (`NETLAB_WORKER_HOST`), sans exposition directe à Internet ni accès public au socket Docker. L’API doit le joindre via HTTPS privé (`NETLAB_WORKER_URL`) et un jeton cryptographiquement aléatoire d’au moins 32 caractères partagé uniquement par secret manager.
+- Configurer `NETLAB_ALLOWED_IMAGES` avec les images validées et préchargées pour cette installation. Les profils catalogue épinglent actuellement des tags, pas des digests ; avant la production, valider leur provenance et épingler les images/définitions dans un registre contrôlé.
+- Terminer TLS au reverse proxy, rediriger HTTP vers HTTPS, n’exposer à Internet que les ports nécessaires, activer un pare-feu, et limiter les tentatives de connexion au niveau du proxy. Le proxy doit fixer les en-têtes `Forwarded`/`X-Forwarded-*` et l’application ne doit faire confiance qu’à l’adresse de ce proxy.
+- Construire et servir le frontend derrière la même origine HTTPS que l’API ; ne pas utiliser Vite, `--reload` ou le serveur de développement en production. L’API désactive alors Swagger/OpenAPI, refuse les hôtes non configurés, limite les corps HTTP à 2 Mio et ajoute des entêtes de sécurité.
+- Le terminal WebSocket interactif est désactivé par défaut en production ; les étudiants n’y ont jamais accès en mode production. Les appels ponctuels sont limités à des commandes réseau en lecture seule et à un ping borné.
+- Initialiser le premier enseignant avec un jeton bootstrap aléatoire d’au moins 32 caractères, puis retirer ce secret de l’environnement et le révoquer dans le gestionnaire de secrets.
+
+Exemple de démarrage de l’API, après configuration des secrets et du proxy TLS :
+
+```bash
+NETLAB_ENV=production uvicorn backend.app.main:app \
+  --host 127.0.0.1 --port 8000 \
+  --proxy-headers --forwarded-allow-ips=127.0.0.1
+```
+
+Remplacez l’adresse de confiance par celle du reverse proxy réellement utilisé ; ne faites pas confiance à `*`. Le worker doit écouter seulement sur son interface privée, avec un proxy TLS privé devant lui si l’API l’atteint en HTTPS. Ne mappez jamais `/var/run/docker.sock` à un conteneur web public.
+
+Exemple de démarrage du worker sur son adresse privée configurée :
+
+```bash
+NETLAB_ENV=production uvicorn worker.main:app \
+  --host "$NETLAB_WORKER_HOST" --port "${NETLAB_WORKER_PORT:-9000}"
+```
+
+Le proxy TLS privé doit être le seul chemin réseau entre l’API et le worker ; filtrez également les accès directs à ce port par pare-feu.
+
+Cette configuration ne suffit pas à autoriser une mise en ligne sans revue. Docker partage le noyau Linux de son hôte : le code ne fournit pas de sandbox noyau gVisor/Kata ni de filtrage du trafic sortant par laboratoire. Il reste indispensable d’utiliser un worker dédié et isolé (idéalement hôte jetable/sandbox validée), de filtrer le réseau, vérifier les permissions Docker, les sauvegardes et procédures d’incident, la limitation de débit du proxy et la sécurité des images. Faire effectuer un audit indépendant et des tests de pénétration autorisés avant toute exposition.
 
 ## Public cible
 
@@ -519,9 +555,9 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Le projet reste un **prototype**, mais les phases 1 et 2 sont opérationnelles et une première tranche de la phase 3 est en place : comptes, laboratoires UUID séparés, membres et rôles, exécution Docker par laboratoire, limites CPU/mémoire, expiration et stockage PostgreSQL optionnel. Le mode SQLite local reste disponible.
+Le projet reste un **prototype**. Le mode production applique maintenant des contrôles de configuration bloquants : PostgreSQL avec TLS, cookies sécurisés, origines HTTPS et hôtes explicitement autorisés, worker distant HTTPS avec jeton fort, liste exacte d’images autorisées, limitation persistante des tentatives de connexion, entêtes de sécurité et taille maximale des requêtes. Les copies étudiantes et remises sont isolées et testées.
 
-Cela ne constitue pas encore une plateforme cloud de production : les jobs restent synchrones, la haute disponibilité des workers n’est pas achevée et l’éditeur étudiant est encore basé sur JSON. La prochaine évolution pédagogique est l’édition visuelle des copies et des modèles d’affectation prêts à l’emploi.
+Ces contrôles sont une base de durcissement, pas une certification de sécurité ni une garantie de disponibilité. Les tâches restent synchrones ; haute disponibilité, orchestration de jobs, politique de sauvegarde/récupération et tests de charge doivent encore être conçus avant un service public.
 
 ## Prototype technique — étape 1
 
@@ -546,6 +582,6 @@ uvicorn backend.app.main:app --reload --port 8000
 
 Puis ouvrir `http://127.0.0.1:5173` pour piloter le laboratoire, consulter les états et les journaux, et éditer la topologie.
 
-L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Elle est réservée au compte enseignant dans le prototype local. Elle n’est pas conçue pour une exposition publique ; les quotas, l’isolation cloud et une revue de sécurité restent nécessaires.
+L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Les connexions WebSocket contrôlent l’origine et l’identité ; en production, une origine HTTPS autorisée est obligatoire.
 
 L’éditeur visuel est disponible : les nœuds peuvent être déplacés, ajoutés, supprimés ou reliés, puis sauvegardés dans la topologie JSON. Pour les topologies v2, les panneaux de configuration permettent d’ajouter ou supprimer des segments, de modifier leurs sous-réseaux, de gérer les interfaces et les routes du nœud sélectionné, puis d’activer son rôle de routeur. Deux modèles prêts à l’emploi sont proposés : un réseau local Ubuntu–Debian et un scénario de routage statique client–routeur–serveur. Le test de connectivité peut sélectionner ses nœuds et une commande contrôlée. Une validation locale signale les références, adresses et routes incohérentes et bloque la sauvegarde, le déploiement ou la vérification tant que le problème n’est pas corrigé ; le backend revalide toujours la topologie.

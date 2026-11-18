@@ -1,3 +1,4 @@
+from copy import deepcopy
 import os
 import tempfile
 import unittest
@@ -82,12 +83,22 @@ class EducationApiTests(unittest.TestCase):
             "email": "student@example.test", "display_name": "Student", "password": "student-password-123",
         })
         self.assertEqual(response.status_code, 201, response.text)
+        response = self.client.post("/api/education/users", headers=teacher_headers, json={
+            "email": "peer@example.test", "display_name": "Peer", "password": "peer-password-123",
+        })
+        self.assertEqual(response.status_code, 201, response.text)
         group_response = self.client.post("/api/education/groups", headers=teacher_headers, json={"name": "Class A"})
         self.assertEqual(group_response.status_code, 201, group_response.text)
         group_id = group_response.json()["group"]["id"]
         response = self.client.post(f"/api/education/groups/{group_id}/members", headers=teacher_headers, json={"email": "student@example.test"})
         self.assertEqual(response.status_code, 201, response.text)
-        response = self.client.post(f"/api/education/groups/{group_id}/assignments", headers=teacher_headers, json={"title": "Ping lab", "topology": topology})
+        response = self.client.post(f"/api/education/groups/{group_id}/members", headers=teacher_headers, json={"email": "peer@example.test"})
+        self.assertEqual(response.status_code, 201, response.text)
+        response = self.client.post(f"/api/education/groups/{group_id}/assignments", headers=teacher_headers, json={
+            "title": "Ping lab", "topology": topology,
+            "instructions": "Configurez le client puis vérifiez la connectivité.",
+            "criteria": ["Le client atteint le serveur", "La route est configurée"],
+        })
         self.assertEqual(response.status_code, 201, response.text)
 
         student = TestClient(self.client.app)
@@ -97,12 +108,34 @@ class EducationApiTests(unittest.TestCase):
         self.assertEqual(len(assignments), 1)
         assignment_id = assignments[0]["id"]
         self.assertEqual(assignments[0]["topology"]["lab"], topology["lab"])
+        self.assertEqual(assignments[0]["instructions"], "Configurez le client puis vérifiez la connectivité.")
+        self.assertEqual(assignments[0]["criteria"], ["Le client atteint le serveur", "La route est configurée"])
 
         response = student.post(f"/api/education/my-assignments/{assignment_id}/clone", headers=self.csrf_headers(student), json={})
         self.assertEqual(response.status_code, 200, response.text)
         copied = response.json()["topology"]
         self.assertIn("-student-", copied["lab"])
         self.assertEqual(str(uuid.UUID(copied["laboratory_id"])), copied["laboratory_id"])
+        peer = TestClient(self.client.app)
+        response = peer.post("/api/auth/login", json={"email": "peer@example.test", "password": "peer-password-123"})
+        self.assertEqual(response.status_code, 200, response.text)
+        peer_assignment = peer.get("/api/education/my-assignments").json()["assignments"][0]
+        self.assertEqual(peer_assignment["id"], assignment_id)
+        peer_copy = peer.post(
+            f"/api/education/my-assignments/{assignment_id}/clone",
+            headers=self.csrf_headers(peer),
+            json={},
+        ).json()["topology"]
+        self.assertNotEqual(copied["laboratory_id"], peer_copy["laboratory_id"])
+        copied["nodes"][0]["interfaces"][0]["ipv4"] = "10.0.1.11/24"
+        tampered_runtime = deepcopy(copied)
+        tampered_runtime["nodes"][0]["command"] = ["sh", "-c", "unexpected command"]
+        response = student.put(
+            f"/api/education/my-assignments/{assignment_id}/topology",
+            headers=self.csrf_headers(student),
+            json={"topology": tampered_runtime},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
         response = student.put(
             f"/api/education/my-assignments/{assignment_id}/topology",
             headers=self.csrf_headers(student),
@@ -111,6 +144,9 @@ class EducationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         persisted = student.get("/api/education/my-assignments").json()["assignments"][0]["topology"]
         self.assertEqual(persisted["laboratory_id"], copied["laboratory_id"])
+        peer_persisted = peer.get("/api/education/my-assignments").json()["assignments"][0]["topology"]
+        self.assertEqual(peer_persisted["nodes"][0]["position"]["x"], peer_copy["nodes"][0]["position"]["x"])
+        self.assertNotEqual(peer_persisted["laboratory_id"], persisted["laboratory_id"])
         tampered = dict(copied)
         tampered["laboratory_id"] = "00000000-0000-0000-0000-000000000001"
         response = student.put(
@@ -193,8 +229,55 @@ class EducationApiTests(unittest.TestCase):
 
         response = self.client.get(f"/api/education/groups/{group_id}/submissions")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["submissions"][0]["status"], "in_progress")
-        self.assertEqual(response.json()["submissions"][0]["runtime_status"], "stopped")
+        self.assertEqual(len(response.json()["submissions"]), 2)
+        response = student.post(
+            f"/api/education/my-assignments/{assignment_id}/submit",
+            headers=self.csrf_headers(student),
+            json={},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        student_history = student.get(f"/api/education/my-assignments/{assignment_id}/submissions")
+        self.assertEqual(student_history.status_code, 200, student_history.text)
+        self.assertEqual(len(student_history.json()["submissions"]), 1)
+        self.assertEqual(student_history.json()["submissions"][0]["topology"]["laboratory_id"], copied["laboratory_id"])
+        self.assertEqual(peer.get(f"/api/education/my-assignments/{assignment_id}/submissions").json()["submissions"], [])
+        teacher_submissions = self.client.get(f"/api/education/groups/{group_id}/submissions").json()["submissions"]
+        submitted = next(item for item in teacher_submissions if item["email"] == "student@example.test")
+        self.assertEqual(submitted["status"], "submitted")
+        self.assertEqual(submitted["attempt_count"], 1)
+        teacher_history_url = f"/api/education/assignments/{assignment_id}/students/{student.get('/api/auth/me').json()['user']['id']}/submissions"
+        teacher_history = self.client.get(teacher_history_url)
+        self.assertEqual(teacher_history.status_code, 200, teacher_history.text)
+        submission_id = teacher_history.json()["submissions"][0]["id"]
+        reviewed = self.client.post(
+            f"/api/education/assignments/{assignment_id}/students/{student.get('/api/auth/me').json()['user']['id']}/submissions/{submission_id}/feedback",
+            headers=teacher_headers,
+            json={"feedback": "Bon travail, vérifiez également la route retour."},
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        self.assertEqual(
+            student.get(f"/api/education/my-assignments/{assignment_id}/submissions").json()["submissions"][0]["feedback"],
+            "Bon travail, vérifiez également la route retour.",
+        )
+        response = student.post(
+            f"/api/education/my-assignments/{assignment_id}/submit",
+            headers=self.csrf_headers(student),
+            json={},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        history_after_resubmit = student.get(f"/api/education/my-assignments/{assignment_id}/submissions").json()["submissions"]
+        self.assertEqual([attempt["attempt"] for attempt in history_after_resubmit], [2, 1])
+        self.assertIsNone(history_after_resubmit[0]["feedback"])
+        self.assertEqual(history_after_resubmit[1]["feedback"], "Bon travail, vérifiez également la route retour.")
+        self.assertEqual(
+            peer.post(
+                f"/api/education/assignments/{assignment_id}/students/{student.get('/api/auth/me').json()['user']['id']}/submissions/{submission_id}/feedback",
+                headers=self.csrf_headers(peer),
+                json={"feedback": "Unauthorized"},
+            ).status_code,
+            403,
+        )
+        peer.close()
         student.close()
 
     def test_private_api_requires_login_and_csrf(self):

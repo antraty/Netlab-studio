@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
-import type { Assignment, Group, Laboratory, ObservabilitySnapshot, ServiceProfile, User } from './api'
+import type { Assignment, Group, GroupSubmission, Laboratory, ObservabilitySnapshot, ServiceProfile, SubmissionAttempt, User } from './api'
 import type { Node, StatusNode, Topology, VersionInfo } from './types'
 
 const user = ref<User | null>(null)
@@ -32,16 +32,24 @@ const users = ref<User[]>([])
 const serviceCatalog = ref<ServiceProfile[]>([])
 const selectedServiceId = ref('nginx')
 const selectedTemplateId = ref('static-routing')
-const submissions = ref<Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; runtime_status: string; submitted_at: number | null }>>([])
+const submissions = ref<GroupSubmission[]>([])
 const assignments = ref<Assignment[]>([])
 const activeAssignmentId = ref('')
-const assignmentDraft = ref('')
+const studentDraftDirty = ref(false)
 const studentTerminalNode = ref('')
 const studentTerminalCommand = ref('hostname')
+const studentSelectedNodeName = ref('')
+const studentSubmissionHistory = ref<SubmissionAttempt[]>([])
+const selectedSubmission = ref<{ assignment_id: string; student_id: string; title: string; display_name: string } | null>(null)
+const teacherSubmissionHistory = ref<SubmissionAttempt[]>([])
+const feedbackDrafts = ref<Record<string, string>>({})
 const newStudent = ref({ email: '', display_name: '', password: '' })
 const newGroupName = ref('')
 const memberEmail = ref('')
 const assignmentTitle = ref('')
+const assignmentTemplateId = ref('current')
+const assignmentInstructions = ref('')
+const assignmentCriteriaDraft = ref('')
 const selectedGroupId = ref('')
 const busy = ref(false)
 const observability = ref<ObservabilitySnapshot | null>(null)
@@ -55,6 +63,7 @@ let observabilityCooldownTimer: number | undefined
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
+const selectedStudentNode = computed(() => activeAssignment.value?.topology.nodes.find(node => node.name === studentSelectedNodeName.value))
 const activeLaboratory = computed(() => laboratories.value.find(item => item.id === activeLaboratoryId.value))
 const canModifyLaboratory = computed(() => user.value?.role === 'teacher' && ['owner', 'editor'].includes(activeLaboratory.value?.role ?? ''))
 const ownsLaboratory = computed(() => user.value?.role === 'teacher' && activeLaboratory.value?.role === 'owner')
@@ -238,8 +247,19 @@ async function addMember() {
 async function publishAssignment() {
   if (!selectedGroupId.value || !topology.value) return
   try {
-    const result = await api.assign(selectedGroupId.value, assignmentTitle.value.trim() || topology.value.lab, topology.value)
-    assignmentTitle.value = ''; pageError.value = `Laboratoire partagé : ${result.assignment.title}`; await loadSubmissions()
+    const template = labTemplates.find(item => item.id === assignmentTemplateId.value)
+    const assignedTopology = template ? structuredClone(template.topology) : structuredClone(topology.value)
+    const result = await api.assign(selectedGroupId.value, {
+      title: assignmentTitle.value.trim() || template?.label || topology.value.lab,
+      topology: assignedTopology,
+      instructions: assignmentInstructions.value,
+      criteria: assignmentCriteriaDraft.value.split('\n').map(item => item.trim()).filter(Boolean),
+    })
+    assignmentTitle.value = ''
+    assignmentInstructions.value = ''
+    assignmentCriteriaDraft.value = ''
+    pageError.value = `Laboratoire partagé : ${result.assignment.title}`
+    await loadSubmissions()
   } catch (error) { showError(error) }
 }
 async function loadSubmissions() {
@@ -250,17 +270,29 @@ async function loadSubmissions() {
 async function loadAssignments() {
   try {
     assignments.value = (await api.myAssignments()).assignments
-    activeAssignmentId.value = assignments.value[0]?.id ?? ''
-    assignmentDraft.value = activeAssignment.value ? JSON.stringify(activeAssignment.value.topology, null, 2) : ''
+    if (!assignments.value.some(item => item.id === activeAssignmentId.value)) {
+      activeAssignmentId.value = assignments.value[0]?.id ?? ''
+    }
+    studentSelectedNodeName.value = activeAssignment.value?.topology.nodes[0]?.name ?? ''
+    studentDraftDirty.value = false
     await refreshStudentRuntime()
+    await loadStudentSubmissionHistory()
   } catch (error) { showError(error) }
 }
 function selectAssignment(id: string) {
   activeAssignmentId.value = id
   const item = activeAssignment.value
-  assignmentDraft.value = item ? JSON.stringify(item.topology, null, 2) : ''
+  studentDraftDirty.value = false
+  studentSelectedNodeName.value = item?.topology.nodes[0]?.name ?? ''
   studentTerminalNode.value = item?.topology.nodes[0]?.name ?? ''
   void refreshStudentRuntime()
+  void loadStudentSubmissionHistory()
+}
+async function loadStudentSubmissionHistory() {
+  const item = activeAssignment.value
+  if (!item) { studentSubmissionHistory.value = []; return }
+  try { studentSubmissionHistory.value = (await api.studentSubmissionHistory(item.id)).submissions }
+  catch (error) { showError(error) }
 }
 async function refreshStudentRuntime() {
   const item = activeAssignment.value
@@ -284,7 +316,7 @@ async function cloneAssignment() {
     activeAssignment.value.topology = result.topology
     activeAssignment.value.status = 'in_progress'
     activeAssignment.value.runtime_status = 'stopped'
-    assignmentDraft.value = JSON.stringify(result.topology, null, 2)
+    studentDraftDirty.value = false
     statuses.value = []
     studentTerminalNode.value = result.topology.nodes[0]?.name ?? ''
     pageError.value = 'Copie réinitialisée.'
@@ -294,9 +326,9 @@ async function cloneAssignment() {
 async function saveAssignment() {
   if (!activeAssignment.value) return false
   try {
-    const parsed = JSON.parse(assignmentDraft.value) as Topology
-    await api.saveAssignmentTopology(activeAssignment.value.id, parsed)
-    activeAssignment.value.topology = parsed; activeAssignment.value.status = 'in_progress'
+    await api.saveAssignmentTopology(activeAssignment.value.id, activeAssignment.value.topology)
+    activeAssignment.value.status = 'in_progress'
+    studentDraftDirty.value = false
     pageError.value = 'Copie personnelle enregistrée.'
     return true
   } catch (error) { showError(error); return false }
@@ -312,8 +344,19 @@ async function submitAssignment() {
     if (activeAssignment.value.status === 'assigned' && !await cloneAssignment()) return
     if (!await saveAssignment()) return
     await api.submitAssignment(activeAssignment.value.id)
-    activeAssignment.value.status = 'submitted'; pageError.value = 'Travail remis à l’enseignant.'
+    activeAssignment.value.status = 'submitted'
+    pageError.value = 'Travail remis à l’enseignant.'
+    await loadAssignments()
   } catch (error) { showError(error) }
+}
+function addStudentRoute(node: Node) {
+  node.routes ??= []
+  node.routes.push({ destination: '', via: '' })
+  studentDraftDirty.value = true
+}
+function removeStudentRoute(node: Node, index: number) {
+  node.routes?.splice(index, 1)
+  studentDraftDirty.value = true
 }
 async function studentRuntimeAction(action: 'up' | 'down' | 'verify') {
   const item = activeAssignment.value
@@ -337,6 +380,28 @@ async function runStudentTerminal() {
   try {
     const result = await api.studentTerminal(item.id, studentTerminalNode.value, command)
     terminalOutput.value = result.output || (result.ok ? 'Commande terminée.' : `Commande échouée (code ${result.exit_code}).`)
+  } catch (error) { showError(error) }
+}
+async function openSubmission(item: GroupSubmission) {
+  try {
+    selectedSubmission.value = {
+      assignment_id: item.assignment_id,
+      student_id: item.student_id,
+      title: item.title,
+      display_name: item.display_name,
+    }
+    teacherSubmissionHistory.value = (await api.teacherSubmissionHistory(item.assignment_id, item.student_id)).submissions
+    feedbackDrafts.value = Object.fromEntries(teacherSubmissionHistory.value.map(entry => [entry.id, entry.feedback ?? '']))
+  } catch (error) { showError(error) }
+}
+async function saveSubmissionFeedback(submission: SubmissionAttempt) {
+  const selectedItem = selectedSubmission.value
+  if (!selectedItem) return
+  try {
+    await api.reviewSubmission(selectedItem.assignment_id, selectedItem.student_id, submission.id, feedbackDrafts.value[submission.id] ?? '')
+    pageError.value = `Retour enregistré pour ${selectedItem.display_name}, tentative ${submission.attempt}.`
+    teacherSubmissionHistory.value = (await api.teacherSubmissionHistory(selectedItem.assignment_id, selectedItem.student_id)).submissions
+    await loadSubmissions()
   } catch (error) { showError(error) }
 }
 
@@ -617,12 +682,43 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
           <nav class="assignment-list"><button v-for="item in assignments" :key="item.id" class="secondary assignment-item" :class="{ active: activeAssignmentId === item.id }" @click="selectAssignment(item.id)"><strong>{{ item.title }}</strong><small>{{ item.group_name }} · {{ item.status }}</small></button></nav>
           <div v-if="activeAssignment" class="assignment-editor">
             <div class="section-title"><div><h2>{{ activeAssignment.title }}</h2><span>{{ activeAssignment.group_name }} · {{ activeAssignment.status }} · runtime {{ activeAssignment.runtime_status }}</span></div><div class="tools"><button class="secondary" @click="cloneAssignment">{{ activeAssignment.topology.laboratory_id ? 'Réinitialiser ma copie' : 'Créer ma copie' }}</button><button class="secondary" :disabled="['running', 'failed'].includes(activeAssignment.runtime_status)" @click="saveAssignment">Enregistrer la copie</button><button @click="submitAssignment">Remettre</button></div></div>
+            <div class="assignment-instructions">
+              <p v-if="activeAssignment.instructions">{{ activeAssignment.instructions }}</p>
+              <div v-if="activeAssignment.criteria.length"><strong>Critères de réussite</strong><ul><li v-for="criterion in activeAssignment.criteria" :key="criterion">{{ criterion }}</li></ul></div>
+            </div>
             <div class="tools">
               <button :disabled="activeAssignment.runtime_status === 'running' || activeAssignment.runtime_status === 'failed'" @click="studentRuntimeAction('up')">Déployer ma copie</button>
               <button class="secondary" :disabled="activeAssignment.runtime_status === 'stopped' || activeAssignment.runtime_status === 'expired'" @click="studentRuntimeAction('down')">Arrêter</button>
               <button class="secondary" :disabled="activeAssignment.runtime_status !== 'running'" @click="studentRuntimeAction('verify')">Vérifier la connectivité</button>
             </div>
-            <label class="json-label">Topologie JSON personnelle<textarea v-model="assignmentDraft" spellcheck="false"></textarea></label>
+            <section v-if="activeAssignment.topology.version >= 2" class="student-topology-editor">
+              <div class="section-title"><div><h3>Éditeur réseau de ma copie</h3><span>modifiez les interfaces et les routes avant le déploiement</span></div></div>
+              <label>Nœud à configurer<select v-model="studentSelectedNodeName"><option v-for="node in activeAssignment.topology.nodes" :key="node.name" :value="node.name">{{ node.name }}</option></select></label>
+              <div v-if="selectedStudentNode" class="student-node-editor">
+                <h4>{{ selectedStudentNode.name }} · Interfaces</h4>
+                <div v-for="iface in selectedStudentNode.interfaces ?? []" :key="`${selectedStudentNode.name}-${iface.name}`" class="student-interface-row">
+                  <strong>{{ iface.name }} · {{ iface.network }}</strong>
+                  <label>IPv4<input v-model="iface.ipv4" placeholder="10.0.1.10/24" @input="studentDraftDirty = true" /></label>
+                  <label>Passerelle<input v-model="iface.gateway" placeholder="10.0.1.1" @input="studentDraftDirty = true" /></label>
+                </div>
+                <div class="section-title routes-heading"><div><h4>Routes statiques</h4></div><button class="secondary" @click="addStudentRoute(selectedStudentNode)">Ajouter une route</button></div>
+                <div v-for="(route, index) in selectedStudentNode.routes ?? []" :key="`${selectedStudentNode.name}-route-${index}`" class="student-interface-row student-route-row">
+                  <label>Destination<input v-model="route.destination" placeholder="10.0.2.0/24" @input="studentDraftDirty = true" /></label>
+                  <label>Passerelle<input v-model="route.via" placeholder="10.0.1.1" @input="studentDraftDirty = true" /></label>
+                  <button class="danger" @click="removeStudentRoute(selectedStudentNode, index)">Supprimer</button>
+                </div>
+              </div>
+              <p class="hint">{{ studentDraftDirty ? 'Modifications non enregistrées.' : 'Configuration enregistrée.' }}</p>
+            </section>
+            <p v-else class="hint">Cette topologie utilise le format ancien ; sa configuration est visible mais pas modifiable visuellement.</p>
+            <section v-if="studentSubmissionHistory.length" class="submission-history">
+              <h3>Historique des remises</h3>
+              <article v-for="attempt in studentSubmissionHistory" :key="attempt.id">
+                <strong>Tentative {{ attempt.attempt }} · {{ new Date(attempt.submitted_at * 1000).toLocaleString() }}</strong>
+                <p v-if="attempt.feedback"><strong>Retour enseignant :</strong> {{ attempt.feedback }}</p>
+                <p v-else class="muted">En attente du retour de l’enseignant.</p>
+              </article>
+            </section>
             <div v-if="activeAssignment.topology.laboratory_id" class="terminal-panel">
               <h3>Terminal de ma copie</h3>
               <div class="tools">
@@ -640,7 +736,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
       </section>
       <p v-if="pageError" class="notice">{{ pageError }}</p>
     </main>
-    <footer>Netlab Studio — copie pédagogique sauvegardée ; aucun déploiement Docker étudiant n’est exposé.</footer>
+    <footer>Netlab Studio — copie pédagogique isolée avec historique de remise.</footer>
   </template>
   <template v-else>
     <header><div><p class="eyebrow">NETLAB STUDIO / ESPACE ENSEIGNANT</p><h1>{{ topology?.lab ?? 'Laboratoire' }}</h1><span v-if="activeLaboratory">Expire le {{ new Date(activeLaboratory.expires_at * 1000).toLocaleString() }}</span></div><div class="header-actions"><select :value="activeLaboratoryId" aria-label="Laboratoire actif" @change="switchLaboratory($event)"><option v-for="lab in laboratories" :key="lab.id" :value="lab.id">{{ lab.name }} · {{ lab.status }}</option></select><button class="secondary" @click="createLaboratory">Nouveau laboratoire</button><span class="badge online">{{ stateText }}</span><span class="badge">{{ user.display_name }}</span><button class="secondary" @click="logout">Déconnexion</button></div></header>
@@ -710,14 +806,31 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
       <section class="panel catalog-panel"><div class="section-title"><div><h2>Catalogue de services</h2><span>{{ deployableServices.length }} profils déployables localement · {{ serviceCatalog.length }} documentés</span></div></div><div class="catalog-grid"><article v-for="profile in serviceCatalog" :key="profile.id" class="catalog-card"><div class="catalog-card-head"><h3>{{ profile.label }}</h3><span class="catalog-status" :class="profile.status">{{ profile.status === 'ready' ? 'disponible' : profile.status === 'planned' ? 'prévu' : 'étude' }}</span></div><code>{{ profile.image ?? 'image VM à définir' }}</code><p><strong>Ports :</strong> {{ portsText(profile) }}</p><p><strong>Ressources :</strong> {{ resourceText(profile) }}</p><p v-if="profile.environment.length"><strong>Variables :</strong> {{ profile.environment.map(item => `${item.name}${item.secret ? ' (secret)' : ''}`).join(', ') }}</p><ul><li v-for="constraint in profile.constraints" :key="constraint">{{ constraint }}</li></ul></article></div></section>
       <section class="panel education-panel">
         <div class="section-title"><div><h2>Partage pédagogique</h2><span>Comptes, groupes, affectations et remises</span></div><button class="secondary" @click="loadEducation">Actualiser</button></div>
-        <p class="hint">Les étudiants reçoivent un instantané JSON indépendant. Le déploiement reste réservé à l’enseignant tant que l’isolation d’exécution par étudiant n’existe pas.</p>
+        <p class="hint">Chaque étudiant reçoit une copie isolée et exécutable. Les modèles et topologies affectés restent des instantanés indépendants.</p>
         <div class="education-grid">
           <form class="stack-form panel nested" @submit.prevent="createStudent"><h3>Créer un compte étudiant</h3><label>Nom affiché<input v-model="newStudent.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newStudent.email" type="email" required /></label><label>Mot de passe initial (12+)<input v-model="newStudent.password" type="password" minlength="12" required /></label><button>Créer le compte</button></form>
           <form class="stack-form panel nested" @submit.prevent="createGroup"><h3>Créer un groupe</h3><label>Nom du groupe<input v-model="newGroupName" required maxlength="100" /></label><button>Créer le groupe</button><label>Groupe actif<select v-model="selectedGroupId" @change="loadSubmissions"><option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }} ({{ group.members }})</option></select></label><label>Ajouter l’étudiant (e-mail)<input v-model="memberEmail" type="email" required /></label><button class="secondary" type="button" :disabled="!selectedGroupId" @click="addMember">Ajouter au groupe</button></form>
-          <div class="panel nested"><h3>Partager le laboratoire courant</h3><label>Titre de l’affectation<input v-model="assignmentTitle" :placeholder="topology.lab" maxlength="120" /></label><button :disabled="!selectedGroupId" @click="publishAssignment">Affecter au groupe</button><p class="hint">La topologie actuelle est copiée comme instantané ; les changements ultérieurs ne modifient pas l’affectation.</p></div>
+          <div class="panel nested assignment-form">
+            <h3>Préparer et affecter un TP</h3>
+            <label>Modèle de topologie<select v-model="assignmentTemplateId"><option value="current">Topologie actuelle — {{ topology.lab }}</option><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select></label>
+            <label>Titre de l’affectation<input v-model="assignmentTitle" :placeholder="topology.lab" maxlength="120" /></label>
+            <label>Consignes<textarea v-model="assignmentInstructions" rows="3" maxlength="5000" placeholder="Présentez les objectifs et le travail attendu."></textarea></label>
+            <label>Critères de réussite (un par ligne)<textarea v-model="assignmentCriteriaDraft" rows="3" maxlength="3000" placeholder="Le client atteint le serveur&#10;La route par défaut est correcte"></textarea></label>
+            <button :disabled="!selectedGroupId" @click="publishAssignment">Affecter au groupe</button>
+            <p class="hint">Le TP est figé au moment de l’affectation ; les futures modifications du laboratoire ne changeront pas les copies.</p>
+          </div>
           <div class="panel nested"><h3>Élèves enregistrés</h3><ul class="compact-list"><li v-for="student in users.filter(item => item.role === 'student')" :key="student.id">{{ student.display_name }} <small>{{ student.email }}</small></li><li v-if="!users.some(item => item.role === 'student')" class="muted">Aucun étudiant créé.</li></ul></div>
         </div>
-        <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Runtime</th><th>Remis</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.runtime_status }}</td><td>{{ item.submitted_at ? new Date(item.submitted_at * 1000).toLocaleString() : '—' }}</td></tr><tr v-if="!submissions.length"><td colspan="5" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
+        <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Runtime</th><th>Tentatives</th><th>Remis / retour</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.runtime_status }}</td><td>{{ item.attempt_count }}</td><td>{{ item.submitted_at ? new Date(item.submitted_at * 1000).toLocaleString() : '—' }}<small>{{ item.feedback ? 'Retour transmis' : 'Pas de retour' }}</small><button v-if="item.attempt_count" class="secondary" @click="openSubmission(item)">Examiner</button></td></tr><tr v-if="!submissions.length"><td colspan="6" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
+        <section v-if="selectedSubmission" class="submission-review">
+          <div class="section-title"><div><h3>Remises — {{ selectedSubmission.title }} / {{ selectedSubmission.display_name }}</h3><span>{{ teacherSubmissionHistory.length }} tentative(s)</span></div><button class="secondary" @click="selectedSubmission = null">Fermer</button></div>
+          <article v-for="attempt in teacherSubmissionHistory" :key="attempt.id" class="submission-attempt">
+            <div class="section-title"><strong>Tentative {{ attempt.attempt }} · {{ new Date(attempt.submitted_at * 1000).toLocaleString() }}</strong><span v-if="attempt.reviewed_at">Retourné le {{ new Date(attempt.reviewed_at * 1000).toLocaleString() }}</span></div>
+            <details><summary>Consulter l’instantané remis</summary><pre>{{ JSON.stringify(attempt.topology, null, 2) }}</pre></details>
+            <label>Retour à l’étudiant<textarea v-model="feedbackDrafts[attempt.id]" maxlength="4000" rows="3" placeholder="Commentaires sur cette tentative"></textarea></label>
+            <button class="secondary" @click="saveSubmissionFeedback(attempt)">Enregistrer le retour</button>
+          </article>
+        </section>
       </section>
       <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal WebSocket</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }} · {{ selectedNode ? nodeStatus(selectedNode.name) : '' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
       </template>
