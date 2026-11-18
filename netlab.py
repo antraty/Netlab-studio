@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,16 @@ from backend.app.services import get_service, validate_catalog_node
 
 class TopologyError(ValueError):
     """Raised when a topology is invalid or cannot be operated safely."""
+
+
+SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$")
+ALLOWED_CONNECTIVITY_COMMANDS = {"getent", "ip", "ping"}
+
+
+def validate_identifier(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not SAFE_IDENTIFIER.fullmatch(value):
+        raise TopologyError(
+            f"{field} must contain 1 to 64 characters: letters, numbers, '.', '_' or '-'")
 
 
 def load_topology(path: Path) -> dict[str, Any]:
@@ -39,8 +50,7 @@ def validate_topology(topology: dict[str, Any]) -> None:
         raise TopologyError(f"Missing top-level fields: {', '.join(sorted(missing))}")
     if topology["version"] != 1:
         raise TopologyError("Only topology format version 1 is supported")
-    if not isinstance(topology["lab"], str) or not topology["lab"].strip():
-        raise TopologyError("lab must be a non-empty string")
+    validate_identifier(topology["lab"], "lab")
 
     network = topology["network"]
     if not isinstance(network, dict):
@@ -48,6 +58,7 @@ def validate_topology(topology: dict[str, Any]) -> None:
     for field in ("name", "driver"):
         if not isinstance(network.get(field), str) or not network[field].strip():
             raise TopologyError(f"network.{field} must be a non-empty string")
+    validate_identifier(network["name"], "network.name")
     if network["driver"] != "bridge":
         raise TopologyError("Prototype only supports the bridge network driver")
 
@@ -62,6 +73,7 @@ def validate_topology(topology: dict[str, Any]) -> None:
         for field in ("name", "image"):
             if not isinstance(node.get(field), str) or not node[field].strip():
                 raise TopologyError(f"node.{field} must be a non-empty string")
+        validate_identifier(node["name"], f"node {node['name']}.name")
         if node["name"] in names:
             raise TopologyError(f"duplicate node name: {node['name']}")
         names.add(node["name"])
@@ -104,6 +116,9 @@ def validate_topology(topology: dict[str, Any]) -> None:
     command = check.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
         raise TopologyError("connectivity_check.command must be a non-empty string list")
+    if command[0] not in ALLOWED_CONNECTIVITY_COMMANDS:
+        allowed = ", ".join(sorted(ALLOWED_CONNECTIVITY_COMMANDS))
+        raise TopologyError(f"connectivity_check.command must start with one of: {allowed}")
 
 
 def docker(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
@@ -159,7 +174,8 @@ def deploy(topology: dict[str, Any]) -> int:
     network = topology["network"]
     network_name = resource_name(topology) + "-network"
     existing = docker("network", "inspect", network_name, capture=True)
-    if existing.returncode != 0:
+    network_created = existing.returncode != 0
+    if network_created:
         args = [
             "network", "create", "--driver", network["driver"],
             "--label", "io.netlab.studio.lab=" + topology["lab"],
@@ -175,13 +191,19 @@ def deploy(topology: dict[str, Any]) -> int:
     else:
         print(f"reusing network {network_name}")
 
+    started: list[str] = []
     for node in topology["nodes"]:
         container = resource_name(topology, node["name"])
         docker("rm", "-f", container, capture=True)
         result = docker(*docker_run_args(topology, node, network_name), capture=True)
         if result.returncode:
             print(f"failed to start {node['name']}: {result.stderr.strip()}", file=sys.stderr)
+            for started_container in started:
+                docker("rm", "-f", started_container, capture=True)
+            if network_created:
+                docker("network", "rm", network_name, capture=True)
             return result.returncode
+        started.append(container)
         print(f"started {node['name']} ({container})")
     return 0
 

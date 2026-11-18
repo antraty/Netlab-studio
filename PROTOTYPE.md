@@ -24,7 +24,7 @@ python3 netlab.py topology.json verify
 python3 netlab.py topology.json down
 ```
 
-`up` crée un réseau dédié au laboratoire et relance proprement les deux conteneurs avec des noms déterministes. `verify` exécute la commande `ping` définie dans la topologie à l’intérieur du conteneur source. Les images de démonstration doivent donc fournir `ping`; si ce n’est pas le cas, le message Docker est retourné tel quel pour rendre le problème explicite.
+`up` crée un réseau dédié au laboratoire et relance proprement les deux conteneurs avec des noms déterministes. `verify` exécute la commande de diagnostic définie dans la topologie à l’intérieur du conteneur source. Le scénario fourni utilise `getent hosts`, disponible dans les images Ubuntu/Debian de démonstration, pour vérifier la résolution DNS Docker réelle sans supposer que le paquet `ping` est installé.
 
 ## Format de topologie v1
 

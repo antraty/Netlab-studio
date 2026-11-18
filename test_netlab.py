@@ -32,6 +32,18 @@ class TopologyTests(unittest.TestCase):
         with self.assertRaises(TopologyError):
             validate_topology(topology)
 
+    def test_docker_identifiers_are_restricted(self):
+        topology = load_topology(ROOT / "topology.json")
+        topology["lab"] = "demo/lab"
+        with self.assertRaises(TopologyError):
+            validate_topology(topology)
+
+    def test_connectivity_check_cannot_run_an_arbitrary_command(self):
+        topology = load_topology(ROOT / "topology.json")
+        topology["connectivity_check"]["command"] = ["sh", "-c", "id"]
+        with self.assertRaises(TopologyError):
+            validate_topology(topology)
+
     def test_invalid_json_is_rejected(self):
         path = ROOT / ".invalid-topology.json"
         path.write_text("{not json", encoding="utf-8")

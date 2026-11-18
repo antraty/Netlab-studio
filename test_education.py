@@ -110,6 +110,17 @@ class EducationApiTests(unittest.TestCase):
         response = self.client.post("/api/education/groups", json={"name": "No CSRF"})
         self.assertEqual(response.status_code, 403)
 
+    def test_login_attempts_are_throttled(self):
+        from backend.app.education import login_throttle
+
+        login_throttle._failures.clear()
+        for _ in range(5):
+            response = self.client.post("/api/auth/login", json={"email": "nobody@example.test", "password": "wrong-password"})
+            self.assertEqual(response.status_code, 401)
+        response = self.client.post("/api/auth/login", json={"email": "nobody@example.test", "password": "wrong-password"})
+        self.assertEqual(response.status_code, 429)
+        login_throttle._failures.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

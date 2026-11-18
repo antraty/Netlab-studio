@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -22,6 +23,39 @@ SESSION_COOKIE = "netlab_session"
 CSRF_COOKIE = "netlab_csrf"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_MAX_FAILURES = 5
+
+
+class LoginThrottle:
+    """Small in-process throttle for the local prototype."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failures: dict[str, list[float]] = {}
+
+    def blocked(self, key: str) -> int:
+        now = time.monotonic()
+        with self._lock:
+            attempts = [stamp for stamp in self._failures.get(key, []) if now - stamp < LOGIN_WINDOW_SECONDS]
+            self._failures[key] = attempts
+            if len(attempts) < LOGIN_MAX_FAILURES:
+                return 0
+            return max(1, int(LOGIN_WINDOW_SECONDS - (now - attempts[0])))
+
+    def failure(self, key: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            attempts = [stamp for stamp in self._failures.get(key, []) if now - stamp < LOGIN_WINDOW_SECONDS]
+            attempts.append(now)
+            self._failures[key] = attempts[-LOGIN_MAX_FAILURES:]
+
+    def success(self, key: str) -> None:
+        with self._lock:
+            self._failures.pop(key, None)
+
+
+login_throttle = LoginThrottle()
 
 
 def _email(value: str) -> str:
@@ -496,26 +530,38 @@ def auth_state() -> dict[str, Any]:
 
 
 @router.post("/auth/bootstrap")
-def bootstrap(request: BootstrapRequest, response: Response) -> dict[str, Any]:
+def bootstrap(request: BootstrapRequest, response: Response, http_request: Request) -> dict[str, Any]:
+    throttle_key = f"bootstrap:{http_request.client.host if http_request.client else 'unknown'}"
+    retry_after = login_throttle.blocked(throttle_key)
+    if retry_after:
+        raise HTTPException(status_code=429, detail="too many setup attempts; retry later", headers={"Retry-After": str(retry_after)})
     secret = os.getenv("NETLAB_BOOTSTRAP_TOKEN", "")
     if not secret:
         raise HTTPException(status_code=503, detail="initial setup is disabled; configure NETLAB_BOOTSTRAP_TOKEN")
     if not hmac.compare_digest(request.bootstrap_token, secret):
+        login_throttle.failure(throttle_key)
         raise HTTPException(status_code=403, detail="invalid setup token")
     try:
         user = store.bootstrap_teacher(request.email, request.display_name, request.password)
     except EducationError as exc:
         status = 409 if "already exists" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+    login_throttle.success(throttle_key)
     csrf = _set_session(response, user["id"])
     return {"user": user, "csrf_token": csrf}
 
 
 @router.post("/auth/login")
-def login(request: LoginRequest, response: Response) -> dict[str, Any]:
+def login(request: LoginRequest, response: Response, http_request: Request) -> dict[str, Any]:
+    throttle_key = f"login:{http_request.client.host if http_request.client else 'unknown'}"
+    retry_after = login_throttle.blocked(throttle_key)
+    if retry_after:
+        raise HTTPException(status_code=429, detail="too many login attempts; retry later", headers={"Retry-After": str(retry_after)})
     user = store.authenticate(request.email, request.password)
     if not user:
+        login_throttle.failure(throttle_key)
         raise HTTPException(status_code=401, detail="invalid email or password")
+    login_throttle.success(throttle_key)
     csrf = _set_session(response, user["id"])
     return {"user": user, "csrf_token": csrf}
 

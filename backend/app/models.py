@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+import netlab
 from .services import validate_catalog_node
 
 
@@ -16,6 +17,12 @@ class Network(BaseModel):
     name: str
     driver: str = "bridge"
     subnet: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, value: str) -> str:
+        netlab.validate_identifier(value, "network.name")
+        return value
 
 
 class Node(BaseModel):
@@ -31,6 +38,12 @@ class Node(BaseModel):
     def required_text(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be empty")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, value: str) -> str:
+        netlab.validate_identifier(value, "node.name")
         return value
 
     @field_validator("command")
@@ -67,6 +80,7 @@ class Topology(BaseModel):
     def validate_graph(self) -> "Topology":
         if self.version != 1:
             raise ValueError("only topology format version 1 is supported")
+        netlab.validate_identifier(self.lab, "lab")
         if len(self.nodes) < 2:
             raise ValueError("nodes must contain at least two nodes")
         names = [node.name for node in self.nodes]
@@ -86,6 +100,9 @@ class Topology(BaseModel):
             raise ValueError("connectivity check references an unknown node")
         if self.connectivity_check.from_node == self.connectivity_check.to_node:
             raise ValueError("connectivity check needs two different nodes")
+        if not self.connectivity_check.command or self.connectivity_check.command[0] not in netlab.ALLOWED_CONNECTIVITY_COMMANDS:
+            allowed = ", ".join(sorted(netlab.ALLOWED_CONNECTIVITY_COMMANDS))
+            raise ValueError(f"connectivity check command must start with one of: {allowed}")
         for link in self.links:
             if link.from_node not in known or link.to_node not in known:
                 raise ValueError("link references an unknown node")
