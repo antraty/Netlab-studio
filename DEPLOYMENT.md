@@ -47,6 +47,33 @@ Navigateur -> frontend:Nginx -> control:8000 -> worker:9000 -> Docker socket
 
 Le socket Docker est monté uniquement dans le worker. Le plan de contrôle n’exécute donc pas directement de commande Docker lorsqu’il utilise `NETLAB_WORKER_URL`.
 
+## Services de données — Tranche 2
+
+Les profils `postgresql`, `mysql` et `mongodb` sont déployables depuis l’éditeur. Ils utilisent respectivement les images `postgres:17-alpine`, `mysql:8.4` et `mongo:8`, des limites de ressources, un healthcheck et un volume Docker nommé par laboratoire et par nœud. `docker compose down` conserve ces volumes ; `docker compose down -v` les supprime.
+
+Une topologie ne doit jamais contenir la valeur d’un mot de passe. Elle référence un secret :
+
+```json
+{
+  "service_id": "postgresql",
+  "image": "postgres:17-alpine",
+  "command": ["postgres"],
+  "environment": {"POSTGRES_USER": "lab", "POSTGRES_DB": "training"},
+  "secret_refs": {"POSTGRES_PASSWORD": "lab-password"},
+  "depends_on": []
+}
+```
+
+La valeur correspondante doit être placée dans le fichier `.env` local du Compose :
+
+```env
+NETLAB_SECRET_LAB_PASSWORD=une-valeur-secrete-longue
+```
+
+Le worker lit cette variable, génère un fichier runtime temporaire en mode `0600` et le transmet à Docker. Le fichier est supprimé avec les autres fichiers runtime lors de l’arrêt du laboratoire. Les variables exigées par chaque profil sont visibles dans le catalogue et dans l’éditeur ; les références de secrets ne sont jamais affichées comme des valeurs.
+
+`depends_on` impose l’ordre de démarrage dans la topologie et les cycles sont refusés. Il s’agit d’un ordre d’exécution du laboratoire, distinct de `depends_on` de Docker Compose qui démarre les services de la plateforme.
+
 ## Production
 
 Le fichier Compose fournit un environnement local reproductible, pas une exposition Internet prête à l’emploi. Avant une exposition publique :

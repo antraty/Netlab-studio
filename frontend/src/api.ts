@@ -66,6 +66,8 @@ export interface ServiceProfile {
   primary_port: number | null
   resources: Record<string, number>
   environment: Array<{ name: string; required: boolean; secret: boolean; purpose: string }>
+  volumes: Array<{ target: string; read_only: boolean }>
+  healthcheck: string | null
   constraints: string[]
   deployable: boolean
 }

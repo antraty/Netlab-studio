@@ -12,6 +12,12 @@ class ServicePort:
 
 
 @dataclass(frozen=True)
+class ServiceVolume:
+    target: str
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
 class EnvironmentRequirement:
     name: str
     required: bool
@@ -32,6 +38,8 @@ class ServiceProfile:
     resources: dict[str, int | float]
     environment: tuple[EnvironmentRequirement, ...]
     constraints: tuple[str, ...]
+    volumes: tuple[ServiceVolume, ...] = ()
+    healthcheck: str | None = None
 
     @property
     def deployable(self) -> bool:
@@ -42,6 +50,7 @@ class ServiceProfile:
         data["command"] = list(self.command)
         data["ports"] = [asdict(port) for port in self.ports]
         data["environment"] = [asdict(item) for item in self.environment]
+        data["volumes"] = [asdict(volume) for volume in self.volumes]
         data["constraints"] = list(self.constraints)
         data["deployable"] = self.deployable
         return data
@@ -86,25 +95,31 @@ PROFILES: tuple[ServiceProfile, ...] = (
         constraints=("DHCP exige un réseau dédié, des droits réseau minimaux et un contrôle strict des broadcasts.", "NET_ADMIN, isolation de segments et configuration DHCP ne sont pas implémentés ; aucun privilège n’est accordé par défaut."),
     ),
     ServiceProfile(
-        id="postgresql", label="PostgreSQL", category="database", status="planned",
-        image="postgres:17-alpine", command=(), ports=(ServicePort(5432, host_publishable=False),), primary_port=None,
-        resources={"recommended_memory_mb": 1024, "recommended_cpu_cores": 1},
+        id="postgresql", label="PostgreSQL", category="database", status="ready",
+        image="postgres:17-alpine", command=("postgres",), ports=(ServicePort(5432, host_publishable=False),), primary_port=None,
+        resources={"memory_mb": 1024, "cpu_cores": 1, "pids": 256},
         environment=(EnvironmentRequirement("POSTGRES_USER", True, False, "Nom du compte initial."), EnvironmentRequirement("POSTGRES_PASSWORD", True, True, "Mot de passe initial obligatoire."), EnvironmentRequirement("POSTGRES_DB", False, False, "Base initiale.")),
-        constraints=("Aucun gestionnaire de secrets ni volume de données persistant n’est encore disponible.", "Ne pas enregistrer de mot de passe dans une topologie versionnée.",),
+        volumes=(ServiceVolume("/var/lib/postgresql/data"),),
+        healthcheck='pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+        constraints=_READY_CONSTRAINTS + ("Les valeurs secrètes viennent de secret_refs et de l’environnement du worker, jamais de la topologie.", "Le volume est conservé lors de l’arrêt ; supprimer explicitement le volume pour réinitialiser les données.",),
     ),
     ServiceProfile(
-        id="mysql", label="MySQL", category="database", status="planned",
-        image="mysql:8.4", command=(), ports=(ServicePort(3306, host_publishable=False),), primary_port=None,
-        resources={"recommended_memory_mb": 1024, "recommended_cpu_cores": 1},
+        id="mysql", label="MySQL", category="database", status="ready",
+        image="mysql:8.4", command=("mysqld",), ports=(ServicePort(3306, host_publishable=False),), primary_port=None,
+        resources={"memory_mb": 1024, "cpu_cores": 1, "pids": 256},
         environment=(EnvironmentRequirement("MYSQL_ROOT_PASSWORD", True, True, "Mot de passe root initial obligatoire."), EnvironmentRequirement("MYSQL_DATABASE", False, False, "Base initiale."), EnvironmentRequirement("MYSQL_USER", False, False, "Compte applicatif."), EnvironmentRequirement("MYSQL_PASSWORD", False, True, "Mot de passe applicatif.")),
-        constraints=("Aucun gestionnaire de secrets ni volume de données persistant n’est encore disponible.", "Ne pas enregistrer de mot de passe dans une topologie versionnée."),
+        volumes=(ServiceVolume("/var/lib/mysql"),),
+        healthcheck='mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"',
+        constraints=_READY_CONSTRAINTS + ("Les mots de passe viennent de secret_refs et de l’environnement du worker, jamais de la topologie.", "Le volume est conservé lors de l’arrêt ; supprimer explicitement le volume pour réinitialiser les données.",),
     ),
     ServiceProfile(
-        id="mongodb", label="MongoDB", category="database", status="planned",
-        image="mongo:8", command=(), ports=(ServicePort(27017, host_publishable=False),), primary_port=None,
-        resources={"recommended_memory_mb": 2048, "recommended_cpu_cores": 1},
-        environment=(EnvironmentRequirement("MONGO_INITDB_ROOT_USERNAME", True, False, "Compte administrateur initial."), EnvironmentRequirement("MONGO_INITDB_ROOT_PASSWORD", True, True, "Mot de passe initial obligatoire.")),
-        constraints=("Aucun gestionnaire de secrets ni volume de données persistant n’est encore disponible.", "Ne pas enregistrer de mot de passe dans une topologie versionnée."),
+        id="mongodb", label="MongoDB", category="database", status="ready",
+        image="mongo:8", command=("mongod", "--bind_ip_all"), ports=(ServicePort(27017, host_publishable=False),), primary_port=None,
+        resources={"memory_mb": 2048, "cpu_cores": 1, "pids": 256},
+        environment=(EnvironmentRequirement("MONGO_INITDB_ROOT_USERNAME", True, False, "Compte administrateur initial."), EnvironmentRequirement("MONGO_INITDB_ROOT_PASSWORD", True, True, "Mot de passe administrateur initial obligatoire.")),
+        volumes=(ServiceVolume("/data/db"),),
+        healthcheck="mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'",
+        constraints=_READY_CONSTRAINTS + ("Le mot de passe vient de secret_refs et de l’environnement du worker, jamais de la topologie.", "Le volume est conservé lors de l’arrêt ; supprimer explicitement le volume pour réinitialiser les données.",),
     ),
     ServiceProfile(
         id="wordpress", label="WordPress", category="application", status="planned",
@@ -163,7 +178,14 @@ def list_services() -> list[dict[str, Any]]:
     return [profile.public_dict() for profile in PROFILES]
 
 
-def validate_catalog_node(service_id: str | None, image: str, command: list[str], published_port: int | None) -> None:
+def validate_catalog_node(
+    service_id: str | None,
+    image: str,
+    command: list[str],
+    published_port: int | None,
+    environment: dict[str, str] | None = None,
+    secret_refs: dict[str, str] | None = None,
+) -> None:
     if service_id is None:
         if published_port is not None:
             raise ValueError("host port publishing is only available for a deployable catalog service")
@@ -177,3 +199,14 @@ def validate_catalog_node(service_id: str | None, image: str, command: list[str]
         raise ValueError(f"image and command for {service_id} must match the catalog profile")
     if published_port is not None and profile.primary_port is None:
         raise ValueError(f"service profile does not support host port publishing: {service_id}")
+    environment = environment or {}
+    secret_refs = secret_refs or {}
+    requirements = {item.name: item for item in profile.environment}
+    unknown = (set(environment) | set(secret_refs)) - set(requirements)
+    if unknown:
+        raise ValueError(f"unsupported service variables: {', '.join(sorted(unknown))}")
+    for item in profile.environment:
+        if item.required and item.name not in environment and item.name not in secret_refs:
+            raise ValueError(f"service variable is required: {item.name}")
+        if item.name in secret_refs and not item.secret:
+            raise ValueError(f"service variable must not be a secret reference: {item.name}")

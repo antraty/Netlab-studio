@@ -22,10 +22,12 @@ services:
       context: .
       dockerfile: docker/worker.Dockerfile
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       NETLAB_ENV: ${NETLAB_ENV:-development}
       NETLAB_WORKER_TOKEN: ${NETLAB_WORKER_TOKEN:-change-me-in-development}
-      NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0}
+      NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0,postgres:17-alpine,mysql:8.4,mongo:8}
       NETLAB_WORKER_CONTAINER: "true"
       NETLAB_WORKER_HOST: 0.0.0.0
       NETLAB_WORKER_PORT: 9000
@@ -55,7 +57,7 @@ services:
       NETLAB_ALLOWED_HOSTS: ${NETLAB_ALLOWED_HOSTS:-localhost,127.0.0.1}
       NETLAB_COOKIE_SECURE: ${NETLAB_COOKIE_SECURE:-false}
       NETLAB_BOOTSTRAP_TOKEN: ${NETLAB_BOOTSTRAP_TOKEN:-}
-      NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0}
+      NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0,postgres:17-alpine,mysql:8.4,mongo:8}
     volumes:
       - netlab-data:/data/netlab
     expose: ["8000"]

@@ -52,6 +52,6 @@
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
 - [x] Ajouter CoreDNS avec des enregistrements A validés dans les sous-réseaux du laboratoire, une configuration générée et montée en lecture seule.
 - [ ] Ajouter DHCP/dnsmasq avec segments dédiés, configuration contrôlée et droits réseau minimaux.
-- [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
+- [x] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
 - [ ] Ajouter WordPress, Jenkins, GitLab et Laravel avec dépendances, limites de ressources, volumes et images épinglées.
 - [ ] Évaluer pfSense, MikroTik CHR et Windows Server/Active Directory sur un moteur VM/KVM avec validation de licences.

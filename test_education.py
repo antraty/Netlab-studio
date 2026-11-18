@@ -293,7 +293,7 @@ class EducationApiTests(unittest.TestCase):
         })
         response = self.client.get("/api/services")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache", "coredns"})
+        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache", "coredns", "postgresql", "mysql", "mongodb"})
         laboratory = self.client.get("/api/laboratories").json()["laboratories"][0]
         from backend.app.main import control
         sample = {

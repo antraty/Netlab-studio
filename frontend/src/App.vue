@@ -62,6 +62,7 @@ let observabilityTimer: number | undefined
 let observabilityCooldownTimer: number | undefined
 
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
+const selectedServiceProfile = computed(() => serviceCatalog.value.find(profile => profile.id === selectedNode.value?.service_id))
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
 const selectedStudentNode = computed(() => activeAssignment.value?.topology.nodes.find(node => node.name === studentSelectedNodeName.value))
@@ -521,7 +522,7 @@ function addNode() {
   const name = window.prompt('Nom du nœud :', `linux-node-${topology.value.nodes.length + 1}`)
   const image = window.prompt('Image Docker :', 'ubuntu:24.04')
   if (!name || !image || topology.value.nodes.some(node => node.name === name)) return
-  const node: Node = { name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 } }
+  const node: Node = { name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 }, environment: {}, secret_refs: {}, depends_on: [] }
   if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   topology.value.nodes.push(node)
   selected.value = name; dirty.value = true
@@ -546,12 +547,31 @@ function addCatalogService() {
   }
   const node: Node = {
     name, image: profile.image, command: [...profile.command], service_id: profile.id,
-    position: { x: 60 + topology.value.nodes.length * 210, y: 110 },
+    position: { x: 60 + topology.value.nodes.length * 210, y: 110 }, environment: {}, secret_refs: {}, depends_on: [],
   }
   if (profile.id === 'coredns') node.dns_records = []
   if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   if (publishedPort !== undefined) node.published_port = publishedPort
   topology.value.nodes.push(node); selected.value = name; dirty.value = true
+}
+function setNodeEnvironment(node: Node, key: string, value: string) {
+  node.environment ??= {}
+  if (value) node.environment[key] = value
+  else delete node.environment[key]
+  if (node.secret_refs) delete node.secret_refs[key]
+  dirty.value = true
+}
+function setNodeSecretRef(node: Node, key: string, value: string) {
+  node.secret_refs ??= {}
+  if (value) node.secret_refs[key] = value
+  else delete node.secret_refs[key]
+  if (node.environment) delete node.environment[key]
+  dirty.value = true
+}
+function setNodeDependencies(node: Node, event: Event) {
+  const select = event.target as HTMLSelectElement
+  node.depends_on = Array.from(select.selectedOptions).map(option => option.value)
+  dirty.value = true
 }
 function resourceText(profile: ServiceProfile) {
   return Object.entries(profile.resources).map(([key, value]) => `${key.replaceAll('_', ' ')} ${value}`).join(' · ')
@@ -749,7 +769,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <template v-if="topology">
       <section class="toolbar"><button :disabled="!canModifyLaboratory" @click="action('up')">Déployer</button><button class="secondary" :disabled="!canModifyLaboratory" @click="action('verify')">Tester la connectivité</button><button class="danger" :disabled="!canModifyLaboratory" @click="action('down')">Arrêter</button><button class="secondary" :disabled="!canModifyLaboratory" @click="save">Nouvelle version</button><button class="secondary" :disabled="!canModifyLaboratory" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button v-if="ownsLaboratory" class="secondary" @click="shareLaboratory">Partager</button><button class="secondary" @click="exportLab">Exporter</button><label v-if="canModifyLaboratory" class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button></section>
-      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Profils disponibles : Nginx, Apache et CoreDNS. DNS reste interne aux segments du laboratoire ; les ports hôte sont liés uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Profils disponibles : Nginx, Apache, CoreDNS, PostgreSQL, MySQL et MongoDB. Les bases utilisent des volumes persistants et des secrets référencés hors topologie. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
         <div class="network-editor-grid">
@@ -766,6 +786,15 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
             <label v-if="!selectedNode.service_id">Commande de démarrage<input :value="nodeCommand(selectedNode)" placeholder="sleep infinity" @input="setNodeCommand(selectedNode, ($event.target as HTMLInputElement).value)" /></label>
             <p v-else class="hint">Le profil catalogue contrôle l’image et la commande de ce nœud.</p>
           </div>
+          <div v-if="selectedServiceProfile?.environment.length" class="service-runtime-config">
+            <div class="section-title"><div><h3>Configuration du service</h3><span>les valeurs secrètes restent hors de la topologie</span></div></div>
+            <div v-for="requirement in selectedServiceProfile.environment" :key="requirement.name" class="interface-row">
+              <label v-if="!requirement.secret">{{ requirement.name }}<input :value="selectedNode.environment?.[requirement.name] ?? ''" :placeholder="requirement.purpose" @input="setNodeEnvironment(selectedNode, requirement.name, ($event.target as HTMLInputElement).value)" /></label>
+              <label v-else>{{ requirement.name }} — référence du secret<input :value="selectedNode.secret_refs?.[requirement.name] ?? ''" placeholder="ex. postgres-password" @input="setNodeSecretRef(selectedNode, requirement.name, ($event.target as HTMLInputElement).value)" /></label>
+            </div>
+            <p class="hint">Le worker lit les secrets sous la forme <code>NETLAB_SECRET_NOM_DU_SECRET</code>. Aucun mot de passe ne doit être saisi dans la topologie ou le dépôt.</p>
+          </div>
+          <label v-if="topology.nodes.length > 1">Dépendances de démarrage (Ctrl/Cmd pour plusieurs)<select multiple :value="selectedNode.depends_on ?? []" @change="setNodeDependencies(selectedNode, $event)"><option v-for="candidate in topology.nodes" :key="candidate.name" :value="candidate.name" :disabled="candidate.name === selectedNode.name">{{ candidate.name }}</option></select></label>
           <label class="router-toggle"><input v-model="selectedNode.router" type="checkbox" @change="selectedNode.type = selectedNode.router ? 'router' : 'linux'; dirty = true" /> Activer le forwarding IPv4 et les capacités routeur</label>
           <div class="interface-list">
             <div v-for="(interfaceItem, index) in selectedNode.interfaces" :key="`${selectedNode.name}-${index}`" class="interface-row">

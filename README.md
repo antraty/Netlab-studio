@@ -605,3 +605,8 @@ docker compose up --build -d
 ```
 
 Consulter [`DEPLOYMENT.md`](DEPLOYMENT.md) pour les prérequis, la construction des images de laboratoire, le flux réseau, le bootstrap du premier enseignant et les précautions avant une exposition publique. Le profil local expose uniquement `http://localhost:8080`; le socket Docker reste monté uniquement dans le worker.
+
+
+### Phase 2 — services de données
+
+La Tranche 2 rend PostgreSQL, MySQL et MongoDB disponibles comme profils de laboratoire. Chaque profil impose son image et sa commande catalogue, ses limites CPU/mémoire/PID, un volume Docker persistant et un healthcheck. Les variables non secrètes sont stockées dans la topologie ; les mots de passe utilisent `secret_refs` et des variables `NETLAB_SECRET_*` présentes uniquement dans l’environnement du worker. Les nœuds peuvent aussi déclarer `depends_on` ; l’orchestrateur refuse les cycles et démarre les dépendances en premier.

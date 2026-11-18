@@ -83,6 +83,9 @@ class Node(BaseModel):
     interfaces: list[Interface] = Field(default_factory=list)
     routes: list[Route] = Field(default_factory=list)
     dns_records: list[DNSRecord] | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+    secret_refs: dict[str, str] = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list, max_length=32)
 
     @field_validator("name", "image")
     @classmethod
@@ -102,6 +105,35 @@ class Node(BaseModel):
     def non_empty_command(cls, value: list[str]) -> list[str]:
         if not value or not all(isinstance(item, str) for item in value):
             raise ValueError("command must be a non-empty string list")
+        return value
+
+    @field_validator("environment")
+    @classmethod
+    def bounded_environment(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, item in value.items():
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key):
+                raise ValueError("environment keys must be uppercase identifiers")
+            if len(item) > 4096:
+                raise ValueError("environment values must be at most 4096 characters")
+        return value
+
+    @field_validator("secret_refs")
+    @classmethod
+    def bounded_secret_refs(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, reference in value.items():
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key):
+                raise ValueError("secret reference keys must be uppercase identifiers")
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", reference):
+                raise ValueError("secret references must be safe identifiers")
+        return value
+
+    @field_validator("depends_on")
+    @classmethod
+    def bounded_dependencies(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("depends_on must not contain duplicates")
+        for dependency in value:
+            netlab.validate_identifier(dependency, "node dependency")
         return value
 
 
@@ -159,7 +191,18 @@ class Topology(BaseModel):
         known = set(names)
         host_ports: set[int] = set()
         for node in self.nodes:
-            validate_catalog_node(node.service_id, node.image, node.command, node.published_port)
+            validate_catalog_node(
+                node.service_id,
+                node.image,
+                node.command,
+                node.published_port,
+                node.environment,
+                node.secret_refs,
+            )
+            if any(dependency not in known for dependency in node.depends_on):
+                raise ValueError(f"node {node.name} depends on an unknown node")
+            if node.name in node.depends_on:
+                raise ValueError(f"node {node.name} cannot depend on itself")
             if node.service_id == "coredns" and not node.dns_records:
                 raise ValueError(f"CoreDNS node {node.name} requires at least one A record")
             if node.service_id != "coredns" and node.dns_records:
