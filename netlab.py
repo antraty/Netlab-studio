@@ -141,6 +141,9 @@ def docker_run_args(topology: dict[str, Any], node: dict[str, Any], network_name
         "--memory", f"{memory_mb}m",
         "--cpus", f"{cpu_cores:g}",
         "--pids-limit", str(pids),
+        "--label", f"io.netlab.studio.memory-mb={memory_mb}",
+        "--label", f"io.netlab.studio.cpu-cores={cpu_cores:g}",
+        "--label", f"io.netlab.studio.pids={pids}",
         "--network", network_name,
         "--label", "io.netlab.studio.lab=" + topology["lab"],
     ]
@@ -157,7 +160,10 @@ def deploy(topology: dict[str, Any]) -> int:
     network_name = resource_name(topology) + "-network"
     existing = docker("network", "inspect", network_name, capture=True)
     if existing.returncode != 0:
-        args = ["network", "create", "--driver", network["driver"]]
+        args = [
+            "network", "create", "--driver", network["driver"],
+            "--label", "io.netlab.studio.lab=" + topology["lab"],
+        ]
         if network.get("subnet"):
             args += ["--subnet", network["subnet"]]
         args.append(network_name)

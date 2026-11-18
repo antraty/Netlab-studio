@@ -18,12 +18,17 @@
 - [x] Déployer les premiers profils Nginx et Apache avec limites Docker et publication de port réservée à localhost.
 - [x] Rejeter les profils non disponibles et les modifications d’image/commande d’un profil catalogue.
 - [x] Documenter dans le catalogue les dépendances et limites des services et appliances restant à intégrer.
+- [x] Ajouter un instantané enseignant des laboratoires, nœuds, réseaux, métriques Docker, stockage, événements et erreurs.
+- [x] Afficher les usages CPU, mémoire, couche inscriptible, I/O bloc et trafic réseau avec seuils d’alerte configurables.
+- [x] Relayer l’observabilité en mode worker distant et borner l’inventaire à 100 conteneurs.
 - [ ] Ajouter invitations sûres, récupération/réinitialisation de mot de passe et limitation des tentatives.
 - [ ] Ajouter rôles administrateur/enseignant/étudiant plus granulaires, groupes de travail et permissions par laboratoire.
 - [ ] Construire l’édition visuelle des copies étudiantes et des modèles de TP prêts à l’emploi.
 - [ ] Isoler l’exécution Docker et les ressources par étudiant/laboratoire avant toute exécution partagée.
 - [ ] Migrer la persistance vers PostgreSQL lorsque plusieurs utilisateurs/cloud seront supportés.
-- [ ] Ajouter la file de tâches, les identités de workers, les quotas, mTLS et l’observabilité.
+- [ ] Compléter la file de tâches, les identités de workers, les quotas agrégés, mTLS et l’observabilité persistante de production.
+- [ ] Historiser les métriques et définir rétention, agrégation et consultation sur la durée.
+- [ ] Enforcer des quotas agrégés par laboratoire/utilisateur et des limites de stockage ; ajouter des notifications d’alerte.
 - [ ] Convertir les liens visuels de topologie en vrais réseaux/interfaces Docker isolés.
 - [ ] Corriger le scénario de démonstration afin que les images disposent de `ping` (ou choisir un test disponible et le documenter).
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.

@@ -28,6 +28,13 @@ def execute_job(job: WorkerJob) -> WorkerResult:
     orchestrator = DockerOrchestrator(job.topology)
     if job.action == "status":
         return WorkerResult(job_id=job.job_id, ok=True, action=job.action, nodes=orchestrator.status())
+    if job.action == "observability":
+        return WorkerResult(
+            job_id=job.job_id,
+            ok=True,
+            action=job.action,
+            observability=orchestrator.observability(),
+        )
     if job.action == "terminal":
         if not job.node_name:
             raise HTTPException(status_code=400, detail="node_name is required for terminal jobs")
