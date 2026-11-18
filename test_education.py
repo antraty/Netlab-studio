@@ -255,13 +255,14 @@ class EducationApiTests(unittest.TestCase):
         reviewed = self.client.post(
             f"/api/education/assignments/{assignment_id}/students/{student.get('/api/auth/me').json()['user']['id']}/submissions/{submission_id}/feedback",
             headers=teacher_headers,
-            json={"feedback": "Bon travail, vérifiez également la route retour."},
+            json={"feedback": "Bon travail, vérifiez également la route retour.", "grade": 92},
         )
         self.assertEqual(reviewed.status_code, 200, reviewed.text)
-        self.assertEqual(
-            student.get(f"/api/education/my-assignments/{assignment_id}/submissions").json()["submissions"][0]["feedback"],
-            "Bon travail, vérifiez également la route retour.",
-        )
+        reviewed_attempt = student.get(
+            f"/api/education/my-assignments/{assignment_id}/submissions",
+        ).json()["submissions"][0]
+        self.assertEqual(reviewed_attempt["feedback"], "Bon travail, vérifiez également la route retour.")
+        self.assertEqual(reviewed_attempt["grade"], 92)
         response = student.post(
             f"/api/education/my-assignments/{assignment_id}/submit",
             headers=self.csrf_headers(student),
@@ -281,6 +282,160 @@ class EducationApiTests(unittest.TestCase):
             403,
         )
         peer.close()
+        student.close()
+
+    def test_invitations_admin_role_and_password_reset_tokens(self):
+        with patch.dict(os.environ, {"NETLAB_BOOTSTRAP_ROLE": "admin"}):
+            bootstrap = self.client.post("/api/auth/bootstrap", json={
+                "bootstrap_token": "test-setup-secret", "email": "admin@example.test",
+                "display_name": "Admin", "password": "admin-password-123",
+            })
+        self.assertEqual(bootstrap.status_code, 200, bootstrap.text)
+        self.assertEqual(bootstrap.json()["user"]["role"], "admin")
+        headers = self.csrf_headers(self.client)
+        group = self.client.post(
+            "/api/education/groups",
+            headers=headers,
+            json={"name": "Invited cohort"},
+        ).json()["group"]
+
+        invited = self.client.post(
+            "/api/education/invitations",
+            headers=headers,
+            json={
+                "email": "invited@example.test",
+                "display_name": "Invited Student",
+                "role": "student",
+                "group_id": group["id"],
+            },
+        )
+        self.assertEqual(invited.status_code, 201, invited.text)
+        token = invited.json()["token"]
+        with education.store._connect() as db:
+            saved_hash = db.execute(
+                "SELECT token_hash FROM account_invitations WHERE email=?",
+                ("invited@example.test",),
+            ).fetchone()["token_hash"]
+        self.assertNotEqual(saved_hash, token)
+
+        accepted = self.client.post(
+            "/api/auth/invitations/accept",
+            json={"token": token, "password": "invited-password-123"},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["user"]["role"], "student")
+        self.assertEqual(
+            self.client.get("/api/education/groups").json()["groups"][0]["id"],
+            group["id"],
+        )
+        replay = self.client.post(
+            "/api/auth/invitations/accept",
+            json={"token": token, "password": "another-password-123"},
+        )
+        self.assertEqual(replay.status_code, 400)
+
+        administrator = TestClient(self.client.app)
+        admin_login = administrator.post(
+            "/api/auth/login",
+            json={"email": "admin@example.test", "password": "admin-password-123"},
+        )
+        self.assertEqual(admin_login.status_code, 200, admin_login.text)
+        reset_issued = administrator.post(
+            f"/api/education/users/{accepted.json()['user']['id']}/password-reset",
+            headers=self.csrf_headers(administrator),
+            json={},
+        )
+        self.assertEqual(reset_issued.status_code, 200, reset_issued.text)
+        reset_token = reset_issued.json()["token"]
+        reset = self.client.post(
+            "/api/auth/password/reset",
+            json={"token": reset_token, "new_password": "updated-password-123"},
+        )
+        self.assertEqual(reset.status_code, 200, reset.text)
+        replay_reset = self.client.post(
+            "/api/auth/password/reset",
+            json={"token": reset_token, "new_password": "replayed-password-123"},
+        )
+        self.assertEqual(replay_reset.status_code, 400)
+        login = TestClient(self.client.app)
+        self.assertEqual(
+            login.post(
+                "/api/auth/login",
+                json={"email": "invited@example.test", "password": "updated-password-123"},
+            ).status_code,
+            200,
+        )
+        administrator.close()
+        login.close()
+
+    def test_student_reset_cleans_runtime_and_restores_assigned_snapshot(self):
+        self.client.post("/api/auth/bootstrap", json={
+            "bootstrap_token": "test-setup-secret", "email": "teacher@example.test",
+            "display_name": "Teacher", "password": "teacher-password-123",
+        })
+        headers = self.csrf_headers(self.client)
+        self.client.post("/api/education/users", headers=headers, json={
+            "email": "student@example.test",
+            "display_name": "Student",
+            "password": "student-password-123",
+        })
+        group = self.client.post(
+            "/api/education/groups",
+            headers=headers,
+            json={"name": "Reset group"},
+        ).json()["group"]
+        self.client.post(
+            f"/api/education/groups/{group['id']}/members",
+            headers=headers,
+            json={"email": "student@example.test"},
+        )
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        assignment = self.client.post(
+            f"/api/education/groups/{group['id']}/assignments",
+            headers=headers,
+            json={"title": "Reset lab", "topology": topology},
+        ).json()["assignment"]
+        student = TestClient(self.client.app)
+        student.post("/api/auth/login", json={
+            "email": "student@example.test",
+            "password": "student-password-123",
+        })
+        assignment_id = assignment["id"]
+        copy = student.post(
+            f"/api/education/my-assignments/{assignment_id}/clone",
+            headers=self.csrf_headers(student),
+            json={},
+        ).json()["topology"]
+        mutated = deepcopy(copy)
+        mutated["nodes"][0]["interfaces"][0]["ipv4"] = "10.0.1.11/24"
+        student.put(
+            f"/api/education/my-assignments/{assignment_id}/topology",
+            headers=self.csrf_headers(student),
+            json={"topology": mutated},
+        )
+        with education.store._connect() as db:
+            db.execute(
+                "UPDATE student_lab_runtime SET status='running' WHERE assignment_id=? AND user_id=?",
+                (assignment_id, student.get("/api/auth/me").json()["user"]["id"]),
+            )
+        with patch("backend.app.main.build_orchestrator") as build:
+            build.return_value.action.return_value = SimpleNamespace(ok=True, exit_code=0, output="cleaned")
+            reset = student.post(
+                f"/api/education/my-assignments/{assignment_id}/reset",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+        self.assertEqual(reset.status_code, 200, reset.text)
+        self.assertEqual(build.call_args.args[0]["laboratory_id"], copy["laboratory_id"])
+        restored = reset.json()["topology"]
+        self.assertEqual(restored["laboratory_id"], copy["laboratory_id"])
+        self.assertEqual(
+            restored["nodes"][0]["interfaces"][0]["ipv4"],
+            topology["nodes"][0]["interfaces"][0]["ipv4"],
+        )
+        runtime = student.get(f"/api/education/my-assignments/{assignment_id}/runtime")
+        self.assertEqual(runtime.status_code, 200, runtime.text)
+        self.assertEqual(runtime.json()["status"], "stopped")
         student.close()
 
     def test_private_api_requires_login_and_csrf(self):

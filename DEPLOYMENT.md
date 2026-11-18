@@ -87,3 +87,23 @@ Le fichier Compose fournit un environnement local reproductible, pas une exposit
 7. ne jamais publier les ports 8000, 9000 ou 5432.
 
 La validation de production bloque volontairement une configuration HTTP ou PostgreSQL non chiffrée. Le profil Compose reste en mode `development` par défaut pour que le démarrage local fonctionne avec `http://localhost:8080`.
+
+## Comptes, invitations et remises
+
+Le premier compte peut être administrateur avec :
+
+```env
+NETLAB_BOOTSTRAP_TOKEN=un-secret-aleatoire-d-au-moins-32-caracteres
+NETLAB_BOOTSTRAP_ROLE=admin
+```
+
+Sans cette variable, le premier compte est enseignant. Les rôles disponibles sont administrateur, enseignant et étudiant.
+
+- les administrateurs peuvent inviter des enseignants ;
+- les enseignants peuvent inviter des étudiants, éventuellement dans un groupe existant ;
+- les invitations sont à usage unique et expirent après 7 jours ;
+- les réinitialisations de mot de passe sont à usage unique et expirent après 1 heure ;
+- les jetons sont affichés une fois puis conservés uniquement sous forme d’empreintes ;
+- aucune remise e-mail n’est effectuée : transmettre le jeton hors du dépôt, par un canal sûr.
+
+Les affectations peuvent inclure des consignes, des critères et un modèle de laboratoire. Chaque remise crée une tentative avec un instantané. La correction peut ajouter un commentaire et une note de 0 à 100. La réinitialisation demandée par l’étudiant arrête d’abord son runtime, puis restaure une copie neuve conforme au modèle sans effacer l’historique des tentatives.

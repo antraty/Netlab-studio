@@ -7,6 +7,7 @@ import type { Node, StatusNode, Topology, VersionInfo } from './types'
 const user = ref<User | null>(null)
 const setupAvailable = ref(false)
 const hasUsers = ref(true)
+const bootstrapRole = ref<'admin' | 'teacher'>('teacher')
 const pageError = ref('')
 const loginEmail = ref('')
 const loginPassword = ref('')
@@ -14,6 +15,10 @@ const setupToken = ref('')
 const setupName = ref('')
 const setupEmail = ref('')
 const setupPassword = ref('')
+const invitationToken = ref('')
+const invitationPassword = ref('')
+const resetToken = ref('')
+const resetPasswordDraft = ref('')
 const topology = ref<Topology | null>(null)
 const laboratories = ref<Laboratory[]>([])
 const activeLaboratoryId = ref('')
@@ -43,8 +48,11 @@ const studentSubmissionHistory = ref<SubmissionAttempt[]>([])
 const selectedSubmission = ref<{ assignment_id: string; student_id: string; title: string; display_name: string } | null>(null)
 const teacherSubmissionHistory = ref<SubmissionAttempt[]>([])
 const feedbackDrafts = ref<Record<string, string>>({})
+const gradeDrafts = ref<Record<string, string>>({})
 const newStudent = ref({ email: '', display_name: '', password: '' })
 const newTeacher = ref({ email: '', display_name: '', password: '' })
+const newInvitation = ref<{ email: string; display_name: string; role: 'student' | 'teacher'; group_id: string }>({ email: '', display_name: '', role: 'student', group_id: '' })
+const invitationTokenIssued = ref('')
 const newGroupName = ref('')
 const memberEmail = ref('')
 const assignmentTitle = ref('')
@@ -67,8 +75,8 @@ const stateText = computed(() => dirty.value ? 'modifications non sauvegardées'
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
 const selectedStudentNode = computed(() => activeAssignment.value?.topology.nodes.find(node => node.name === studentSelectedNodeName.value))
 const activeLaboratory = computed(() => laboratories.value.find(item => item.id === activeLaboratoryId.value))
-const canModifyLaboratory = computed(() => user.value?.role === 'teacher' && ['owner', 'editor'].includes(activeLaboratory.value?.role ?? ''))
-const ownsLaboratory = computed(() => user.value?.role === 'teacher' && activeLaboratory.value?.role === 'owner')
+const canModifyLaboratory = computed(() => ['teacher', 'admin'].includes(user.value?.role ?? '') && ['owner', 'editor'].includes(activeLaboratory.value?.role ?? ''))
+const ownsLaboratory = computed(() => ['teacher', 'admin'].includes(user.value?.role ?? '') && activeLaboratory.value?.role === 'owner')
 const deployableServices = computed(() => serviceCatalog.value.filter(profile => profile.deployable))
 const topologyNetworks = computed(() => topology.value?.networks ?? [])
 const topologyIssues = computed(() => {
@@ -148,9 +156,10 @@ async function initialize() {
     const state = await api.authState()
     hasUsers.value = state.has_users
     setupAvailable.value = state.bootstrap_enabled && !state.has_users
+    bootstrapRole.value = state.bootstrap_role
     try { user.value = (await api.me()).user } catch { user.value = null }
     if (!user.value) return
-    if (user.value.role === 'teacher') {
+    if (user.value.role !== 'student') {
       await loadLaboratories()
       await refresh(true)
       await loadObservability()
@@ -206,6 +215,27 @@ async function login() {
   catch (error) { showError(error) }
   finally { busy.value = false }
 }
+async function acceptInvitation() {
+  busy.value = true
+  try {
+    const result = await api.acceptInvitation(invitationToken.value, invitationPassword.value)
+    user.value = result.user
+    invitationToken.value = ''
+    invitationPassword.value = ''
+    await initialize()
+  } catch (error) { showError(error) }
+  finally { busy.value = false }
+}
+async function resetPassword() {
+  busy.value = true
+  try {
+    await api.resetPassword(resetToken.value, resetPasswordDraft.value)
+    resetToken.value = ''
+    resetPasswordDraft.value = ''
+    pageError.value = 'Mot de passe modifié. Vous pouvez vous connecter.'
+  } catch (error) { showError(error) }
+  finally { busy.value = false }
+}
 async function bootstrap() {
   busy.value = true
   try {
@@ -223,7 +253,7 @@ async function logout() {
   observabilityTimer = undefined
   observabilityCooldownTimer = undefined
   observabilityRefreshAllowed.value = true
-  terminalSocket.value?.close(); user.value = null; topology.value = null; laboratories.value = []; activeLaboratoryId.value = ''; assignments.value = []; observability.value = null; pageError.value = ''
+  terminalSocket.value?.close(); user.value = null; topology.value = null; laboratories.value = []; activeLaboratoryId.value = ''; assignments.value = []; observability.value = null; invitationTokenIssued.value = ''; pageError.value = ''
 }
 
 async function loadEducation() {
@@ -240,6 +270,23 @@ async function createStudent() {
 async function createTeacher() {
   try { await api.createTeacher(newTeacher.value); newTeacher.value = { email: '', display_name: '', password: '' }; await loadEducation(); pageError.value = 'Compte enseignant créé. Transmettez ses identifiants par un canal sûr.' }
   catch (error) { showError(error) }
+}
+async function createInvitation() {
+  try {
+    const result = await api.createInvitation({
+      ...newInvitation.value,
+      group_id: newInvitation.value.group_id || null,
+    })
+    invitationTokenIssued.value = result.token
+    newInvitation.value = { email: '', display_name: '', role: 'student', group_id: '' }
+    pageError.value = `Invitation créée pour ${result.invitation.email}. Transmettez le jeton avant son expiration dans 7 jours.`
+  } catch (error) { showError(error) }
+}
+async function issuePasswordReset(userItem: User) {
+  try {
+    const result = await api.issuePasswordReset(userItem.id)
+    window.prompt(`Jeton de réinitialisation pour ${userItem.email} (valide 1 heure) — transmettre par un canal sûr :`, result.token)
+  } catch (error) { showError(error) }
 }
 async function createGroup() {
   try { await api.createGroup(newGroupName.value); newGroupName.value = ''; await loadEducation() }
@@ -269,7 +316,7 @@ async function publishAssignment() {
   } catch (error) { showError(error) }
 }
 async function loadSubmissions() {
-  if (!selectedGroupId.value || user.value?.role !== 'teacher') { submissions.value = []; return }
+  if (!selectedGroupId.value || !['teacher', 'admin'].includes(user.value?.role ?? '')) { submissions.value = []; return }
   try { submissions.value = (await api.submissions(selectedGroupId.value)).submissions }
   catch (error) { showError(error) }
 }
@@ -313,12 +360,9 @@ async function refreshStudentRuntime() {
 async function cloneAssignment() {
   if (!activeAssignment.value) return false
   try {
-    if (['running', 'failed'].includes(activeAssignment.value.runtime_status)) {
-      const stopped = await api.studentRuntimeAction(activeAssignment.value.id, 'down')
-      if (!stopped.ok) throw new Error(`Impossible de nettoyer le laboratoire (code ${stopped.exit_code}).`)
-      activeAssignment.value.runtime_status = 'stopped'
-    }
-    const result = await api.cloneAssignment(activeAssignment.value.id)
+    const result = activeAssignment.value.topology.laboratory_id
+      ? await api.resetAssignment(activeAssignment.value.id)
+      : await api.cloneAssignment(activeAssignment.value.id)
     activeAssignment.value.topology = result.topology
     activeAssignment.value.status = 'in_progress'
     activeAssignment.value.runtime_status = 'stopped'
@@ -326,6 +370,7 @@ async function cloneAssignment() {
     statuses.value = []
     studentTerminalNode.value = result.topology.nodes[0]?.name ?? ''
     pageError.value = 'Copie réinitialisée.'
+    await loadStudentSubmissionHistory()
     return true
   } catch (error) { showError(error); return false }
 }
@@ -398,13 +443,17 @@ async function openSubmission(item: GroupSubmission) {
     }
     teacherSubmissionHistory.value = (await api.teacherSubmissionHistory(item.assignment_id, item.student_id)).submissions
     feedbackDrafts.value = Object.fromEntries(teacherSubmissionHistory.value.map(entry => [entry.id, entry.feedback ?? '']))
+    gradeDrafts.value = Object.fromEntries(teacherSubmissionHistory.value.map(entry => [entry.id, entry.grade === null ? '' : String(entry.grade)]))
   } catch (error) { showError(error) }
 }
 async function saveSubmissionFeedback(submission: SubmissionAttempt) {
   const selectedItem = selectedSubmission.value
   if (!selectedItem) return
   try {
-    await api.reviewSubmission(selectedItem.assignment_id, selectedItem.student_id, submission.id, feedbackDrafts.value[submission.id] ?? '')
+    const rawGrade = gradeDrafts.value[submission.id]?.trim() ?? ''
+    const grade = rawGrade ? Number(rawGrade) : null
+    if (rawGrade && (!Number.isFinite(grade) || grade! < 0 || grade! > 100)) throw new Error('La note doit être comprise entre 0 et 100.')
+    await api.reviewSubmission(selectedItem.assignment_id, selectedItem.student_id, submission.id, feedbackDrafts.value[submission.id] ?? '', grade)
     pageError.value = `Retour enregistré pour ${selectedItem.display_name}, tentative ${submission.attempt}.`
     teacherSubmissionHistory.value = (await api.teacherSubmissionHistory(selectedItem.assignment_id, selectedItem.student_id)).submissions
     await loadSubmissions()
@@ -615,7 +664,7 @@ async function refresh(loadTopology = !dirty.value) {
   } catch (error) { showError(error) }
 }
 async function loadObservability() {
-  if (user.value?.role !== 'teacher' || observabilityLoading.value || !observabilityRefreshAllowed.value) return
+  if (!['teacher', 'admin'].includes(user.value?.role ?? '') || observabilityLoading.value || !observabilityRefreshAllowed.value) return
   observabilityLoading.value = true
   observabilityRefreshAllowed.value = false
   observabilityCooldownTimer = window.setTimeout(() => {
@@ -675,7 +724,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
 
 <template>
   <template v-if="!user">
-    <header><div><p class="eyebrow">NETLAB STUDIO / ESPACE SÉCURISÉ</p><h1>{{ setupAvailable ? 'Créer le compte enseignant' : 'Connexion' }}</h1></div><span class="badge">Prototype local</span></header>
+    <header><div><p class="eyebrow">NETLAB STUDIO / ESPACE SÉCURISÉ</p><h1>{{ setupAvailable ? `Créer le compte ${bootstrapRole === 'admin' ? 'administrateur' : 'enseignant'}` : 'Connexion' }}</h1></div><span class="badge">Prototype local</span></header>
     <main class="auth-main">
       <section class="panel auth-panel">
         <p class="hint">Les sessions sont protégées par cookie HttpOnly et jeton CSRF. Le service reste destiné à un usage local.</p>
@@ -684,7 +733,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
           <label>Nom affiché<input v-model="setupName" autocomplete="name" required maxlength="100" /></label>
           <label>Adresse e-mail<input v-model="setupEmail" type="email" autocomplete="email" required /></label>
           <label>Mot de passe initial (12 caractères minimum)<input v-model="setupPassword" type="password" autocomplete="new-password" minlength="12" required /></label>
-          <button :disabled="busy">Initialiser le compte enseignant</button>
+          <button :disabled="busy">Initialiser le compte {{ bootstrapRole === 'admin' ? 'administrateur' : 'enseignant' }}</button>
         </form>
         <form v-else @submit.prevent="login" class="stack-form">
           <label>Adresse e-mail<input v-model="loginEmail" type="email" autocomplete="username" required /></label>
@@ -692,6 +741,23 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
           <button :disabled="busy">Se connecter</button>
           <p v-if="!hasUsers" class="hint">Aucun compte n’existe. Configurez NETLAB_BOOTSTRAP_TOKEN puis rechargez cette page pour initialiser le premier enseignant.</p>
         </form>
+        <details v-if="!setupAvailable" class="auth-recovery">
+          <summary>Accepter une invitation</summary>
+          <form class="stack-form" @submit.prevent="acceptInvitation">
+            <label>Jeton d’invitation<input v-model="invitationToken" autocomplete="off" required /></label>
+            <label>Mot de passe (12 caractères minimum)<input v-model="invitationPassword" type="password" autocomplete="new-password" minlength="12" required /></label>
+            <button :disabled="busy">Créer mon compte</button>
+          </form>
+        </details>
+        <details v-if="!setupAvailable" class="auth-recovery">
+          <summary>Réinitialiser mon mot de passe</summary>
+          <form class="stack-form" @submit.prevent="resetPassword">
+            <label>Jeton de réinitialisation<input v-model="resetToken" autocomplete="off" required /></label>
+            <label>Nouveau mot de passe (12 caractères minimum)<input v-model="resetPasswordDraft" type="password" autocomplete="new-password" minlength="12" required /></label>
+            <button :disabled="busy">Changer le mot de passe</button>
+          </form>
+          <p class="hint">Demandez un jeton à un enseignant ou administrateur ; aucun jeton n’est envoyé par e-mail automatiquement.</p>
+        </details>
         <p v-if="pageError" class="notice error">{{ pageError }}</p>
       </section>
     </main>
@@ -740,6 +806,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
               <h3>Historique des remises</h3>
               <article v-for="attempt in studentSubmissionHistory" :key="attempt.id">
                 <strong>Tentative {{ attempt.attempt }} · {{ new Date(attempt.submitted_at * 1000).toLocaleString() }}</strong>
+                <p v-if="attempt.grade !== null"><strong>Note :</strong> {{ attempt.grade }} / 100</p>
                 <p v-if="attempt.feedback"><strong>Retour enseignant :</strong> {{ attempt.feedback }}</p>
                 <p v-else class="muted">En attente du retour de l’enseignant.</p>
               </article>
@@ -842,8 +909,9 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
         <div class="section-title"><div><h2>Partage pédagogique</h2><span>Comptes, groupes, affectations et remises</span></div><button class="secondary" @click="loadEducation">Actualiser</button></div>
         <p class="hint">Chaque étudiant reçoit une copie isolée et exécutable. Les modèles et topologies affectés restent des instantanés indépendants.</p>
         <div class="education-grid">
-          <form class="stack-form panel nested" @submit.prevent="createTeacher"><h3>Créer un autre compte enseignant</h3><label>Nom affiché<input v-model="newTeacher.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newTeacher.email" type="email" required /></label><label>Mot de passe initial (12+)<input v-model="newTeacher.password" type="password" minlength="12" required /></label><button>Créer le compte enseignant</button><p class="hint">Les enseignants sont créés par un enseignant connecté. Transmettez le mot de passe initial séparément.</p></form>
+          <form class="stack-form panel nested" @submit.prevent="createTeacher"><h3>Créer un autre compte enseignant</h3><label>Nom affiché<input v-model="newTeacher.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newTeacher.email" type="email" required /></label><label>Mot de passe initial (12+)<input v-model="newTeacher.password" type="password" minlength="12" required /></label><button>Créer le compte enseignant</button><p class="hint">Transmettez le mot de passe initial séparément.</p></form>
           <form class="stack-form panel nested" @submit.prevent="createStudent"><h3>Créer un compte étudiant</h3><label>Nom affiché<input v-model="newStudent.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newStudent.email" type="email" required /></label><label>Mot de passe initial (12+)<input v-model="newStudent.password" type="password" minlength="12" required /></label><button>Créer le compte</button></form>
+          <form class="stack-form panel nested" @submit.prevent="createInvitation"><h3>Inviter un utilisateur</h3><label>Nom affiché<input v-model="newInvitation.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newInvitation.email" type="email" required /></label><label>Rôle<select v-model="newInvitation.role"><option value="student">Étudiant</option><option v-if="user.role === 'admin'" value="teacher">Enseignant</option></select></label><label v-if="newInvitation.role === 'student'">Groupe initial<select v-model="newInvitation.group_id"><option value="">Aucun groupe</option><option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option></select></label><button>Créer l’invitation</button><p class="hint">Le jeton à usage unique s’affiche une fois. À transmettre par un canal distinct et sûr.</p><label v-if="invitationTokenIssued">Jeton à transmettre<textarea :value="invitationTokenIssued" rows="3" readonly /></label></form>
           <form class="stack-form panel nested" @submit.prevent="createGroup"><h3>Créer un groupe</h3><label>Nom du groupe<input v-model="newGroupName" required maxlength="100" /></label><button>Créer le groupe</button><label>Groupe actif<select v-model="selectedGroupId" @change="loadSubmissions"><option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }} ({{ group.members }})</option></select></label><label>Ajouter l’étudiant (e-mail)<input v-model="memberEmail" type="email" required /></label><button class="secondary" type="button" :disabled="!selectedGroupId" @click="addMember">Ajouter au groupe</button></form>
           <div class="panel nested assignment-form">
             <h3>Préparer et affecter un TP</h3>
@@ -854,15 +922,16 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
             <button :disabled="!selectedGroupId" @click="publishAssignment">Affecter au groupe</button>
             <p class="hint">Le TP est figé au moment de l’affectation ; les futures modifications du laboratoire ne changeront pas les copies.</p>
           </div>
-          <div class="panel nested"><h3>Élèves enregistrés</h3><ul class="compact-list"><li v-for="student in users.filter(item => item.role === 'student')" :key="student.id">{{ student.display_name }} <small>{{ student.email }}</small></li><li v-if="!users.some(item => item.role === 'student')" class="muted">Aucun étudiant créé.</li></ul></div>
+          <div class="panel nested"><h3>Comptes</h3><ul class="compact-list"><li v-for="account in users" :key="account.id">{{ account.display_name }} <small>{{ account.email }} · {{ account.role }}</small><button class="secondary" type="button" @click="issuePasswordReset(account)">Émettre un jeton de réinitialisation</button></li><li v-if="!users.length" class="muted">Aucun compte.</li></ul></div>
         </div>
-        <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Runtime</th><th>Tentatives</th><th>Remis / retour</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.runtime_status }}</td><td>{{ item.attempt_count }}</td><td>{{ item.submitted_at ? new Date(item.submitted_at * 1000).toLocaleString() : '—' }}<small>{{ item.feedback ? 'Retour transmis' : 'Pas de retour' }}</small><button v-if="item.attempt_count" class="secondary" @click="openSubmission(item)">Examiner</button></td></tr><tr v-if="!submissions.length"><td colspan="6" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
+        <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Runtime</th><th>Tentatives</th><th>Note / retour</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.runtime_status }}</td><td>{{ item.attempt_count }}</td><td>{{ item.grade === null ? '—' : `${item.grade} / 100` }}<small>{{ item.feedback ? 'Retour transmis' : 'Pas de retour' }}</small><button v-if="item.attempt_count" class="secondary" @click="openSubmission(item)">Examiner</button></td></tr><tr v-if="!submissions.length"><td colspan="6" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
         <section v-if="selectedSubmission" class="submission-review">
           <div class="section-title"><div><h3>Remises — {{ selectedSubmission.title }} / {{ selectedSubmission.display_name }}</h3><span>{{ teacherSubmissionHistory.length }} tentative(s)</span></div><button class="secondary" @click="selectedSubmission = null">Fermer</button></div>
           <article v-for="attempt in teacherSubmissionHistory" :key="attempt.id" class="submission-attempt">
             <div class="section-title"><strong>Tentative {{ attempt.attempt }} · {{ new Date(attempt.submitted_at * 1000).toLocaleString() }}</strong><span v-if="attempt.reviewed_at">Retourné le {{ new Date(attempt.reviewed_at * 1000).toLocaleString() }}</span></div>
             <details><summary>Consulter l’instantané remis</summary><pre>{{ JSON.stringify(attempt.topology, null, 2) }}</pre></details>
             <label>Retour à l’étudiant<textarea v-model="feedbackDrafts[attempt.id]" maxlength="4000" rows="3" placeholder="Commentaires sur cette tentative"></textarea></label>
+            <label>Note sur 100<input v-model="gradeDrafts[attempt.id]" type="number" min="0" max="100" step="0.5" placeholder="Facultatif" /></label>
             <button class="secondary" @click="saveSubmissionFeedback(attempt)">Enregistrer le retour</button>
           </article>
         </section>

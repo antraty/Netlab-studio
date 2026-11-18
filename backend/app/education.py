@@ -32,6 +32,8 @@ SESSION_COOKIE = "netlab_session"
 CSRF_COOKIE = "netlab_csrf"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
+INVITATION_TTL_SECONDS = 7 * 24 * 60 * 60
+PASSWORD_RESET_TTL_SECONDS = 60 * 60
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_MAX_FAILURES = 5
 
@@ -216,6 +218,24 @@ class EducationStore:
                     window_started_at DOUBLE PRECISION NOT NULL,
                     blocked_until DOUBLE PRECISION
                 );
+                CREATE TABLE IF NOT EXISTS account_invitations (
+                    token_hash TEXT PRIMARY KEY,
+                    email TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('teacher', 'student')),
+                    group_id TEXT,
+                    created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at DOUBLE PRECISION NOT NULL,
+                    expires_at DOUBLE PRECISION NOT NULL,
+                    used_at DOUBLE PRECISION
+                );
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at DOUBLE PRECISION NOT NULL,
+                    expires_at DOUBLE PRECISION NOT NULL,
+                    used_at DOUBLE PRECISION
+                );
                 CREATE TABLE IF NOT EXISTS groups (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -269,6 +289,7 @@ class EducationStore:
                     topology_json TEXT NOT NULL,
                     submitted_at DOUBLE PRECISION NOT NULL,
                     feedback TEXT,
+                    grade DOUBLE PRECISION,
                     reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
                     reviewed_at DOUBLE PRECISION,
                     UNIQUE(assignment_id, user_id, attempt),
@@ -310,6 +331,8 @@ class EducationStore:
                 CREATE INDEX IF NOT EXISTS idx_groups_teacher ON groups(teacher_id);
                 CREATE INDEX IF NOT EXISTS idx_members_user ON group_members(user_id);
                 CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_window ON auth_login_attempts(window_started_at);
+                CREATE INDEX IF NOT EXISTS idx_invitations_expiry ON account_invitations(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_reset_tokens(user_id, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_assignments_group ON assignments(group_id);
                 CREATE INDEX IF NOT EXISTS idx_student_runtime_expiry ON student_lab_runtime(status, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_student_submissions ON student_submission_attempts(assignment_id,user_id,attempt);
@@ -320,6 +343,39 @@ class EducationStore:
                 CREATE INDEX IF NOT EXISTS idx_laboratory_events_lab ON laboratory_events(laboratory_id, created_at);
                 """
             )
+            if db.postgres:
+                has_admin_column = db.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name='users' AND column_name='is_admin'"
+                ).fetchone()
+            else:
+                has_admin_column = any(row["name"] == "is_admin" for row in db.execute("PRAGMA table_info(users)"))
+            if not has_admin_column:
+                db.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+            if db.postgres:
+                has_invitation_group_column = db.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name='account_invitations' AND column_name='group_id'"
+                ).fetchone()
+            else:
+                has_invitation_group_column = any(
+                    row["name"] == "group_id"
+                    for row in db.execute("PRAGMA table_info(account_invitations)")
+                )
+            if not has_invitation_group_column:
+                db.execute("ALTER TABLE account_invitations ADD COLUMN group_id TEXT")
+            if db.postgres:
+                has_grade_column = db.execute(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name='student_submission_attempts' AND column_name='grade'"
+                ).fetchone()
+            else:
+                has_grade_column = any(
+                    row["name"] == "grade"
+                    for row in db.execute("PRAGMA table_info(student_submission_attempts)")
+                )
+            if not has_grade_column:
+                db.execute("ALTER TABLE student_submission_attempts ADD COLUMN grade DOUBLE PRECISION")
             db.execute(
                 "INSERT INTO laboratory_versions(laboratory_id,version,created_at,reason,topology_json) "
                 "SELECT l.id,1,l.created_at,'migrated-current',l.topology_json FROM laboratories l "
@@ -330,13 +386,17 @@ class EducationStore:
         with self._connect() as db:
             return int(db.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"])
 
-    def bootstrap_teacher(self, email: str, display_name: str, password: str) -> dict[str, str]:
+    def bootstrap_teacher(
+        self, email: str, display_name: str, password: str, role: str = "teacher",
+    ) -> dict[str, str]:
         email = _email(email)
         display_name = display_name.strip()
         if not display_name or len(display_name) > 100:
             raise EducationError("display name must contain 1 to 100 characters")
         password = _password(password)
-        user = {"id": str(uuid.uuid4()), "email": email, "display_name": display_name, "role": "teacher"}
+        if role not in {"teacher", "admin"}:
+            raise EducationError("initial role must be teacher or admin")
+        user = {"id": str(uuid.uuid4()), "email": email, "display_name": display_name, "role": role}
         try:
             with self._connect() as db:
                 if db.postgres:
@@ -344,8 +404,8 @@ class EducationStore:
                 if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
                     raise EducationError("initial teacher account already exists")
                 db.execute(
-                    "INSERT INTO users(id,email,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)",
-                    (user["id"], email, display_name, hash_password(password), "teacher", time.time()),
+                    "INSERT INTO users(id,email,display_name,password_hash,role,created_at,is_admin) VALUES(?,?,?,?,?,?,?)",
+                    (user["id"], email, display_name, hash_password(password), "teacher", time.time(), int(role == "admin")),
                 )
         except _integrity_error_types() as exc:
             raise EducationError("an account with this email already exists") from exc
@@ -357,14 +417,14 @@ class EducationStore:
         if not display_name or len(display_name) > 100:
             raise EducationError("display name must contain 1 to 100 characters")
         password = _password(password)
-        if role not in {"teacher", "student"}:
-            raise EducationError("role must be teacher or student")
+        if role not in {"admin", "teacher", "student"}:
+            raise EducationError("role must be admin, teacher or student")
         user = {"id": str(uuid.uuid4()), "email": email, "display_name": display_name, "role": role}
         try:
             with self._connect() as db:
                 db.execute(
-                    "INSERT INTO users(id,email,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)",
-                    (user["id"], email, display_name, hash_password(password), role, time.time()),
+                    "INSERT INTO users(id,email,display_name,password_hash,role,created_at,is_admin) VALUES(?,?,?,?,?,?,?)",
+                    (user["id"], email, display_name, hash_password(password), "teacher" if role == "admin" else role, time.time(), int(role == "admin")),
                 )
         except _integrity_error_types() as exc:
             raise EducationError("an account with this email already exists") from exc
@@ -381,7 +441,157 @@ class EducationStore:
 
     @staticmethod
     def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, str]:
-        return {key: str(row[key]) for key in ("id", "email", "display_name", "role")}
+        user = {key: str(row[key]) for key in ("id", "email", "display_name", "role")}
+        if bool(row["is_admin"]) if "is_admin" in row.keys() else False:
+            user["role"] = "admin"
+        return user
+
+    def issue_invitation(
+        self, creator_id: str, email: str, display_name: str, role: str,
+        group_id: str | None = None,
+    ) -> tuple[dict[str, str], str]:
+        email = _email(email)
+        display_name = display_name.strip()
+        if not display_name or len(display_name) > 100:
+            raise EducationError("display name must contain 1 to 100 characters")
+        if role not in {"teacher", "student"}:
+            raise EducationError("invitation role must be teacher or student")
+        if group_id and role != "student":
+            raise EducationError("only student invitations can be linked to a group")
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        try:
+            with self._connect() as db:
+                if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+                    raise EducationError("an account with this email already exists")
+                if group_id and not db.execute(
+                    "SELECT id FROM groups WHERE id=? AND (teacher_id=? OR EXISTS "
+                    "(SELECT 1 FROM users WHERE id=? AND is_admin=1))",
+                    (group_id, creator_id, creator_id),
+                ).fetchone():
+                    raise EducationError("group not found")
+                db.execute(
+                    "DELETE FROM account_invitations WHERE email=? AND used_at IS NULL",
+                    (email,),
+                )
+                db.execute(
+                    "INSERT INTO account_invitations(token_hash,email,display_name,role,group_id,created_by,created_at,expires_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (_token_hash(token), email, display_name, role, group_id, creator_id, now, now + INVITATION_TTL_SECONDS),
+                )
+        except _integrity_error_types() as exc:
+            raise EducationError("an invitation for this email already exists") from exc
+        return {"email": email, "display_name": display_name, "role": role}, token
+
+    def accept_invitation(self, token: str, password: str) -> dict[str, str]:
+        password = _password(password)
+        with self._connect() as db:
+            if db.postgres:
+                row = db.execute(
+                    "SELECT * FROM account_invitations WHERE token_hash=? AND used_at IS NULL AND expires_at>? FOR UPDATE",
+                    (_token_hash(token), time.time()),
+                ).fetchone()
+            else:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT * FROM account_invitations WHERE token_hash=? AND used_at IS NULL AND expires_at>?",
+                    (_token_hash(token), time.time()),
+                ).fetchone()
+            if not row:
+                raise EducationError("invitation is invalid or expired")
+            if db.execute("SELECT 1 FROM users WHERE email=?", (row["email"],)).fetchone():
+                raise EducationError("an account with this email already exists")
+            user = {
+                "id": str(uuid.uuid4()),
+                "email": row["email"],
+                "display_name": row["display_name"],
+                "role": row["role"],
+            }
+            db.execute(
+                "INSERT INTO users(id,email,display_name,password_hash,role,created_at,is_admin) VALUES(?,?,?,?,?,?,0)",
+                (user["id"], user["email"], user["display_name"], hash_password(password), user["role"], time.time()),
+            )
+            db.execute(
+                "UPDATE account_invitations SET used_at=? WHERE token_hash=? AND used_at IS NULL",
+                (time.time(), _token_hash(token)),
+            )
+            if row["group_id"]:
+                group = db.execute(
+                    "SELECT id FROM groups WHERE id=?",
+                    (row["group_id"],),
+                ).fetchone()
+                if not group:
+                    raise EducationError("invitation group no longer exists")
+                db.execute(
+                    "INSERT INTO group_members(group_id,user_id,added_at) VALUES(?,?,?)",
+                    (row["group_id"], user["id"], time.time()),
+                )
+                db.execute(
+                    "INSERT INTO student_labs(assignment_id,user_id,topology_json,status,updated_at) "
+                    "SELECT a.id,?,a.topology_json,'assigned',? FROM assignments a WHERE a.group_id=?",
+                    (user["id"], time.time(), row["group_id"]),
+                )
+            return user
+
+    def issue_password_reset(self, user_id: str, issuer_id: str, issuer_role: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._connect() as db:
+            target = db.execute(
+                "SELECT role,is_admin FROM users WHERE id=?",
+                (user_id,),
+            ).fetchone()
+            if not target:
+                raise EducationError("user not found")
+            target_role = "admin" if target["is_admin"] else target["role"]
+            if issuer_role != "admin":
+                if target_role != "student":
+                    raise EducationError("administrator role required to reset staff passwords")
+                membership = db.execute(
+                    "SELECT 1 FROM group_members m JOIN groups g ON g.id=m.group_id "
+                    "WHERE m.user_id=? AND g.teacher_id=? LIMIT 1",
+                    (user_id, issuer_id),
+                ).fetchone()
+                if not membership:
+                    raise EducationError("student is not in one of your groups")
+            db.execute(
+                "UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL",
+                (now, user_id),
+            )
+            db.execute(
+                "INSERT INTO password_reset_tokens(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+                (_token_hash(token), user_id, now, now + PASSWORD_RESET_TTL_SECONDS),
+            )
+        return token
+
+    def reset_password(self, token: str, new_password: str) -> None:
+        new_password = _password(new_password)
+        now = time.time()
+        with self._connect() as db:
+            if db.postgres:
+                row = db.execute(
+                    "SELECT user_id FROM password_reset_tokens "
+                    "WHERE token_hash=? AND used_at IS NULL AND expires_at>? FOR UPDATE",
+                    (_token_hash(token), now),
+                ).fetchone()
+            else:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT user_id FROM password_reset_tokens "
+                    "WHERE token_hash=? AND used_at IS NULL AND expires_at>?",
+                    (_token_hash(token), now),
+                ).fetchone()
+            if not row:
+                raise EducationError("password reset token is invalid or expired")
+            db.execute(
+                "UPDATE users SET password_hash=? WHERE id=?",
+                (hash_password(new_password), row["user_id"]),
+            )
+            db.execute(
+                "UPDATE password_reset_tokens SET used_at=? WHERE token_hash=?",
+                (now, _token_hash(token)),
+            )
+            db.execute("DELETE FROM sessions WHERE user_id=?", (row["user_id"],))
 
     def create_session(self, user_id: str) -> tuple[str, str]:
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
@@ -935,11 +1145,13 @@ class EducationStore:
 
     def list_groups(self, user: dict[str, str]) -> list[dict[str, Any]]:
         with self._connect() as db:
-            if user["role"] == "teacher":
+            if user["role"] in {"teacher", "admin"}:
                 rows = db.execute(
                     "SELECT g.id,g.name,g.teacher_id,COUNT(m.user_id) AS members FROM groups g "
-                    "LEFT JOIN group_members m ON m.group_id=g.id WHERE g.teacher_id=? GROUP BY g.id ORDER BY g.name",
-                    (user["id"],),
+                    "LEFT JOIN group_members m ON m.group_id=g.id "
+                    + ("" if user["role"] == "admin" else "WHERE g.teacher_id=? ")
+                    + "GROUP BY g.id ORDER BY g.name",
+                    () if user["role"] == "admin" else (user["id"],),
                 )
             else:
                 rows = db.execute(
@@ -952,7 +1164,11 @@ class EducationStore:
 
     def add_member(self, teacher_id: str, group_id: str, email: str) -> None:
         with self._connect() as db:
-            group = db.execute("SELECT id FROM groups WHERE id=? AND teacher_id=?", (group_id, teacher_id)).fetchone()
+            group = db.execute(
+                "SELECT id FROM groups WHERE id=? AND (teacher_id=? OR EXISTS "
+                "(SELECT 1 FROM users WHERE id=? AND is_admin=1))",
+                (group_id, teacher_id, teacher_id),
+            ).fetchone()
             user = db.execute("SELECT id,role FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
             if not group:
                 raise EducationError("group not found")
@@ -1001,7 +1217,11 @@ class EducationStore:
         created_at = time.time()
         snapshot = json.dumps(topology, separators=(",", ":"), ensure_ascii=False)
         with self._connect() as db:
-            group = db.execute("SELECT id FROM groups WHERE id=? AND teacher_id=?", (group_id, teacher_id)).fetchone()
+            group = db.execute(
+                "SELECT id FROM groups WHERE id=? AND (teacher_id=? OR EXISTS "
+                "(SELECT 1 FROM users WHERE id=? AND is_admin=1))",
+                (group_id, teacher_id, teacher_id),
+            ).fetchone()
             if not group:
                 raise EducationError("group not found")
             db.execute(
@@ -1033,7 +1253,8 @@ class EducationStore:
                 "COALESCE(sr.status,'stopped') AS runtime_status,COALESCE(d.instructions,'') AS instructions,"
                 "COALESCE(d.criteria_json,'[]') AS criteria_json,"
                 "(SELECT COUNT(*) FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id) AS attempt_count,"
-                "(SELECT sa.feedback FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS feedback "
+                "(SELECT sa.feedback FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS feedback,"
+                "(SELECT sa.grade FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS grade "
                 "FROM student_labs sl JOIN assignments a ON a.id=sl.assignment_id JOIN groups g ON g.id=a.group_id "
                 "LEFT JOIN assignment_details d ON d.assignment_id=a.id "
                 "LEFT JOIN student_lab_runtime sr ON sr.assignment_id=sl.assignment_id AND sr.user_id=sl.user_id "
@@ -1052,6 +1273,7 @@ class EducationStore:
             result["criteria"] = json.loads(row["criteria_json"])
             result["attempt_count"] = row["attempt_count"]
             result["feedback"] = row["feedback"]
+            result["grade"] = row["grade"]
         if include_topology:
             result["topology"] = json.loads(row["topology_json"])
         return result
@@ -1115,6 +1337,39 @@ class EducationStore:
                 raise EducationError("clean up the student laboratory before resetting it")
             topology = json.loads(row["topology_json"])
             laboratory_id, topology["lab"] = self._student_laboratory_identity(assignment_id, student_id, topology)
+            topology["laboratory_id"] = laboratory_id
+            snapshot = json.dumps(topology, separators=(",", ":"), ensure_ascii=False)
+            now = time.time()
+            db.execute(
+                "UPDATE student_labs SET topology_json=?,status='in_progress',updated_at=?,submitted_at=NULL "
+                "WHERE assignment_id=? AND user_id=?",
+                (snapshot, now, assignment_id, student_id),
+            )
+            db.execute(
+                "INSERT INTO student_lab_runtime(assignment_id,user_id,status,updated_at,expires_at) "
+                "VALUES(?,?,'stopped',?,NULL) ON CONFLICT(assignment_id,user_id) DO UPDATE SET "
+                "status='stopped',updated_at=excluded.updated_at,expires_at=NULL",
+                (assignment_id, student_id, now),
+            )
+            return topology
+
+    def reset_student_laboratory(self, student_id: str, assignment_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            if db.postgres:
+                db.execute("SELECT id FROM users WHERE id=? FOR UPDATE", (student_id,))
+            else:
+                db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT a.topology_json FROM student_labs sl JOIN assignments a ON a.id=sl.assignment_id "
+                "WHERE sl.assignment_id=? AND sl.user_id=?",
+                (assignment_id, student_id),
+            ).fetchone()
+            if not row:
+                raise EducationError("assignment not found")
+            topology = json.loads(row["topology_json"])
+            laboratory_id, topology["lab"] = self._student_laboratory_identity(
+                assignment_id, student_id, topology,
+            )
             topology["laboratory_id"] = laboratory_id
             snapshot = json.dumps(topology, separators=(",", ":"), ensure_ascii=False)
             now = time.time()
@@ -1258,7 +1513,7 @@ class EducationStore:
             if not assignment:
                 raise EducationError("assignment not found")
             rows = db.execute(
-                "SELECT id,attempt,topology_json,submitted_at,feedback,reviewed_at "
+                "SELECT id,attempt,topology_json,submitted_at,feedback,grade,reviewed_at "
                 "FROM student_submission_attempts WHERE assignment_id=? AND user_id=? ORDER BY attempt DESC",
                 (assignment_id, student_id),
             )
@@ -1269,6 +1524,7 @@ class EducationStore:
                     "topology": json.loads(row["topology_json"]),
                     "submitted_at": row["submitted_at"],
                     "feedback": row["feedback"],
+                    "grade": row["grade"],
                     "reviewed_at": row["reviewed_at"],
                 }
                 for row in rows
@@ -1280,13 +1536,14 @@ class EducationStore:
         with self._connect() as db:
             assignment = db.execute(
                 "SELECT a.group_id FROM assignments a JOIN groups g ON g.id=a.group_id "
-                "WHERE a.id=? AND g.teacher_id=?",
-                (assignment_id, teacher_id),
+                "WHERE a.id=? AND (g.teacher_id=? OR EXISTS "
+                "(SELECT 1 FROM users WHERE id=? AND is_admin=1))",
+                (assignment_id, teacher_id, teacher_id),
             ).fetchone()
             if not assignment:
                 raise EducationError("assignment not found")
             rows = db.execute(
-                "SELECT sa.id,sa.attempt,sa.topology_json,sa.submitted_at,sa.feedback,sa.reviewed_at,"
+                "SELECT sa.id,sa.attempt,sa.topology_json,sa.submitted_at,sa.feedback,sa.grade,sa.reviewed_at,"
                 "reviewer.display_name AS reviewed_by "
                 "FROM student_submission_attempts sa "
                 "JOIN group_members gm ON gm.group_id=? AND gm.user_id=sa.user_id "
@@ -1301,6 +1558,7 @@ class EducationStore:
                     "topology": json.loads(row["topology_json"]),
                     "submitted_at": row["submitted_at"],
                     "feedback": row["feedback"],
+                    "grade": row["grade"],
                     "reviewed_at": row["reviewed_at"],
                     "reviewed_by": row["reviewed_by"],
                 }
@@ -1316,21 +1574,26 @@ class EducationStore:
             return history
 
     def review_submission(
-        self, teacher_id: str, assignment_id: str, student_id: str, submission_id: str, feedback: str,
+        self, teacher_id: str, assignment_id: str, student_id: str, submission_id: str,
+        feedback: str, grade: float | None = None,
     ) -> None:
         feedback = feedback.strip()
         if not feedback or len(feedback) > 4000:
             raise EducationError("feedback must contain 1 to 4000 characters")
+        if grade is not None and (not math.isfinite(grade) or not 0 <= grade <= 100):
+            raise EducationError("grade must be between 0 and 100")
         with self._connect() as db:
             result = db.execute(
-                "UPDATE student_submission_attempts SET feedback=?,reviewed_by=?,reviewed_at=? "
+                "UPDATE student_submission_attempts SET feedback=?,grade=?,reviewed_by=?,reviewed_at=? "
                 "WHERE id=? AND assignment_id=? AND user_id=? AND EXISTS ("
                 "SELECT 1 FROM assignments a JOIN groups g ON g.id=a.group_id "
                 "JOIN group_members gm ON gm.group_id=g.id AND gm.user_id=? "
-                "WHERE a.id=? AND g.teacher_id=? AND student_submission_attempts.assignment_id=a.id)",
+                "WHERE a.id=? AND (g.teacher_id=? OR EXISTS "
+                "(SELECT 1 FROM users WHERE id=? AND is_admin=1)) "
+                "AND student_submission_attempts.assignment_id=a.id)",
                 (
-                    feedback, teacher_id, time.time(), submission_id, assignment_id, student_id,
-                    student_id, assignment_id, teacher_id,
+                    feedback, grade, teacher_id, time.time(), submission_id, assignment_id, student_id,
+                    student_id, assignment_id, teacher_id, teacher_id,
                 ),
             )
             if result.rowcount == 0:
@@ -1412,14 +1675,19 @@ class EducationStore:
 
     def submissions(self, teacher_id: str, group_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
-            group = db.execute("SELECT id FROM groups WHERE id=? AND teacher_id=?", (group_id, teacher_id)).fetchone()
+            group = db.execute(
+                "SELECT id FROM groups WHERE id=? AND (teacher_id=? OR EXISTS "
+                "(SELECT 1 FROM users WHERE id=? AND is_admin=1))",
+                (group_id, teacher_id, teacher_id),
+            ).fetchone()
             if not group:
                 raise EducationError("group not found")
             return [dict(row) for row in db.execute(
                 "SELECT a.id AS assignment_id,a.title,u.id AS student_id,u.email,u.display_name,sl.status,sl.updated_at,sl.submitted_at,"
                 "COALESCE(sr.status,'stopped') AS runtime_status,"
                 "(SELECT COUNT(*) FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id) AS attempt_count,"
-                "(SELECT sa.feedback FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS feedback "
+                "(SELECT sa.feedback FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS feedback,"
+                "(SELECT sa.grade FROM student_submission_attempts sa WHERE sa.assignment_id=a.id AND sa.user_id=sl.user_id ORDER BY sa.attempt DESC LIMIT 1) AS grade "
                 "FROM assignments a JOIN student_labs sl ON sl.assignment_id=a.id JOIN users u ON u.id=sl.user_id "
                 "LEFT JOIN student_lab_runtime sr ON sr.assignment_id=sl.assignment_id AND sr.user_id=sl.user_id "
                 "WHERE a.group_id=? ORDER BY a.created_at DESC,u.display_name COLLATE NOCASE",
@@ -1487,6 +1755,38 @@ class ChangePasswordRequest(BaseModel):
         return _password(value)
 
 
+class AcceptInvitationRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def valid_password(cls, value: str) -> str:
+        return _password(value)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def valid_password(cls, value: str) -> str:
+        return _password(value)
+
+
+class InvitationRequest(BaseModel):
+    email: str
+    display_name: str
+    role: str = "student"
+    group_id: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str) -> str:
+        return _email(value)
+
+
 class GroupRequest(BaseModel):
     name: str
 
@@ -1508,6 +1808,7 @@ class SaveTopologyRequest(BaseModel):
 
 class SubmissionFeedbackRequest(BaseModel):
     feedback: str = Field(min_length=1, max_length=4000)
+    grade: float | None = Field(default=None, ge=0, le=100)
 
 
 def require_user(request: Request) -> dict[str, str]:
@@ -1525,7 +1826,7 @@ def require_user(request: Request) -> dict[str, str]:
 
 
 def require_teacher(user: dict[str, str] = Depends(require_user)) -> dict[str, str]:
-    if user["role"] != "teacher":
+    if user["role"] not in {"teacher", "admin"}:
         raise HTTPException(status_code=403, detail="teacher role required")
     return user
 
@@ -1546,7 +1847,11 @@ def _clear_session(response: Response) -> None:
 
 @router.get("/auth/state")
 def auth_state() -> dict[str, Any]:
-    return {"has_users": store.user_count() > 0, "bootstrap_enabled": bool(os.getenv("NETLAB_BOOTSTRAP_TOKEN"))}
+    return {
+        "has_users": store.user_count() > 0,
+        "bootstrap_enabled": bool(os.getenv("NETLAB_BOOTSTRAP_TOKEN")),
+        "bootstrap_role": os.getenv("NETLAB_BOOTSTRAP_ROLE", "teacher"),
+    }
 
 
 @router.post("/auth/bootstrap")
@@ -1562,13 +1867,35 @@ def bootstrap(request: BootstrapRequest, response: Response, http_request: Reque
         login_throttle.failure(throttle_key)
         raise HTTPException(status_code=403, detail="invalid setup token")
     try:
-        user = store.bootstrap_teacher(request.email, request.display_name, request.password)
+        user = store.bootstrap_teacher(
+            request.email, request.display_name, request.password,
+            os.getenv("NETLAB_BOOTSTRAP_ROLE", "teacher"),
+        )
     except EducationError as exc:
         status = 409 if "already exists" in str(exc) else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     login_throttle.success(throttle_key)
     csrf = _set_session(response, user["id"])
     return {"user": user, "csrf_token": csrf}
+
+
+@router.post("/auth/invitations/accept")
+def accept_invitation(request: AcceptInvitationRequest, response: Response) -> dict[str, Any]:
+    try:
+        user = store.accept_invitation(request.token, request.password)
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    csrf = _set_session(response, user["id"])
+    return {"user": user, "csrf_token": csrf}
+
+
+@router.post("/auth/password/reset")
+def reset_password(request: ResetPasswordRequest) -> dict[str, bool]:
+    try:
+        store.reset_password(request.token, request.new_password)
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @router.post("/auth/login")
@@ -1640,6 +1967,36 @@ def create_teacher(request: CreateStudentRequest, teacher: dict[str, str] = Depe
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/education/invitations", status_code=201)
+def create_invitation(
+    request: InvitationRequest,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    if request.role == "teacher" and teacher["role"] != "admin":
+        raise HTTPException(status_code=403, detail="administrator role required to invite teachers")
+    try:
+        invitation, token = store.issue_invitation(
+            teacher["id"], request.email, request.display_name, request.role, request.group_id,
+        )
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"invitation": invitation, "token": token, "expires_in": INVITATION_TTL_SECONDS}
+
+
+@router.post("/education/users/{user_id}/password-reset")
+def issue_password_reset(
+    user_id: str,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        token = store.issue_password_reset(user_id, teacher["id"], teacher["role"])
+    except EducationError as exc:
+        message = str(exc)
+        status = 404 if message == "user not found" else 403 if "administrator role" in message or "your groups" in message else 400
+        raise HTTPException(status_code=status, detail=message) from exc
+    return {"token": token, "expires_in": PASSWORD_RESET_TTL_SECONDS}
+
+
 @router.get("/education/groups")
 def list_groups(user: dict[str, str] = Depends(require_user)) -> dict[str, Any]:
     return {"groups": store.list_groups(user)}
@@ -1703,7 +2060,9 @@ def review_student_submission(
     teacher: dict[str, str] = Depends(require_teacher),
 ) -> dict[str, bool]:
     try:
-        store.review_submission(teacher["id"], assignment_id, student_id, submission_id, request.feedback)
+        store.review_submission(
+            teacher["id"], assignment_id, student_id, submission_id, request.feedback, request.grade,
+        )
     except EducationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True}
@@ -1725,6 +2084,32 @@ def clone_assignment(assignment_id: str, student: dict[str, str] = Depends(requi
     except EducationError as exc:
         status = 404 if str(exc) == "assignment not found" else 409
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@router.post("/education/my-assignments/{assignment_id}/reset")
+def reset_assignment_laboratory(
+    assignment_id: str,
+    student: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    if student["role"] != "student":
+        raise HTTPException(status_code=403, detail="student role required")
+    try:
+        laboratory = store.student_laboratory(student["id"], assignment_id)
+        if laboratory:
+            from .main import build_orchestrator
+
+            result = build_orchestrator(laboratory["topology"]).action("down")
+            if not result.ok:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"student laboratory cleanup failed (exit {result.exit_code})",
+                )
+        topology = store.reset_student_laboratory(student["id"], assignment_id)
+    except EducationError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "assignment not found" else 409, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"topology": topology}
 
 
 @router.put("/education/my-assignments/{assignment_id}/topology")

@@ -4,7 +4,7 @@ export interface User {
   id: string
   email: string
   display_name: string
-  role: 'teacher' | 'student'
+  role: 'admin' | 'teacher' | 'student'
 }
 export interface Group {
   id: string
@@ -24,6 +24,7 @@ export interface Assignment {
   criteria: string[]
   attempt_count: number
   feedback: string | null
+  grade: number | null
   topology: Topology
 }
 export interface SubmissionAttempt {
@@ -32,6 +33,7 @@ export interface SubmissionAttempt {
   topology: Topology
   submitted_at: number
   feedback: string | null
+  grade: number | null
   reviewed_at: number | null
   reviewed_by?: string | null
 }
@@ -46,6 +48,7 @@ export interface GroupSubmission {
   submitted_at: number | null
   attempt_count: number
   feedback: string | null
+  grade: number | null
 }
 export interface Laboratory {
   id: string
@@ -171,15 +174,19 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const api = {
   services: () => request<{ services: ServiceProfile[] }>('/api/services'),
-  authState: () => request<{ has_users: boolean; bootstrap_enabled: boolean }>('/api/auth/state'),
+  authState: () => request<{ has_users: boolean; bootstrap_enabled: boolean; bootstrap_role: 'admin' | 'teacher' }>('/api/auth/state'),
   me: () => request<{ user: User }>('/api/auth/me'),
   observability: () => request<ObservabilitySnapshot>('/api/observability'),
   login: (email: string, password: string) => request<{ user: User; csrf_token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   bootstrap: (payload: { bootstrap_token: string; email: string; display_name: string; password: string }) => request<{ user: User; csrf_token: string }>('/api/auth/bootstrap', { method: 'POST', body: JSON.stringify(payload) }),
+  acceptInvitation: (token: string, password: string) => request<{ user: User; csrf_token: string }>('/api/auth/invitations/accept', { method: 'POST', body: JSON.stringify({ token, password }) }),
+  resetPassword: (token: string, new_password: string) => request<{ ok: boolean }>('/api/auth/password/reset', { method: 'POST', body: JSON.stringify({ token, new_password }) }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST', body: '{}' }),
   changePassword: (current_password: string, new_password: string) => request<{ ok: boolean; reauthentication_required: boolean }>('/api/auth/password', { method: 'POST', body: JSON.stringify({ current_password, new_password }) }),
   createStudent: (payload: { email: string; display_name: string; password: string }) => request<{ user: User }>('/api/education/users', { method: 'POST', body: JSON.stringify(payload) }),
   createTeacher: (payload: { email: string; display_name: string; password: string }) => request<{ user: User }>('/api/education/teachers', { method: 'POST', body: JSON.stringify(payload) }),
+  createInvitation: (payload: { email: string; display_name: string; role: 'student' | 'teacher'; group_id?: string | null }) => request<{ invitation: { email: string; display_name: string; role: string }; token: string; expires_in: number }>('/api/education/invitations', { method: 'POST', body: JSON.stringify(payload) }),
+  issuePasswordReset: (userId: string) => request<{ token: string; expires_in: number }>(`/api/education/users/${encodeURIComponent(userId)}/password-reset`, { method: 'POST', body: '{}' }),
   users: () => request<{ users: User[] }>('/api/education/users'),
   groups: () => request<{ groups: Group[] }>('/api/education/groups'),
   createGroup: (name: string) => request<{ group: Group }>('/api/education/groups', { method: 'POST', body: JSON.stringify({ name }) }),
@@ -188,9 +195,10 @@ export const api = {
   submissions: (groupId: string) => request<{ submissions: GroupSubmission[] }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
   studentSubmissionHistory: (assignmentId: string) => request<{ submissions: SubmissionAttempt[] }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/submissions`),
   teacherSubmissionHistory: (assignmentId: string, studentId: string) => request<{ submissions: SubmissionAttempt[] }>(`/api/education/assignments/${encodeURIComponent(assignmentId)}/students/${encodeURIComponent(studentId)}/submissions`),
-  reviewSubmission: (assignmentId: string, studentId: string, submissionId: string, feedback: string) => request<{ ok: boolean }>(`/api/education/assignments/${encodeURIComponent(assignmentId)}/students/${encodeURIComponent(studentId)}/submissions/${encodeURIComponent(submissionId)}/feedback`, { method: 'POST', body: JSON.stringify({ feedback }) }),
+  reviewSubmission: (assignmentId: string, studentId: string, submissionId: string, feedback: string, grade: number | null) => request<{ ok: boolean }>(`/api/education/assignments/${encodeURIComponent(assignmentId)}/students/${encodeURIComponent(studentId)}/submissions/${encodeURIComponent(submissionId)}/feedback`, { method: 'POST', body: JSON.stringify({ feedback, grade }) }),
   myAssignments: () => request<{ assignments: Assignment[] }>('/api/education/my-assignments'),
   cloneAssignment: (assignmentId: string) => request<{ topology: Topology }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/clone`, { method: 'POST', body: '{}' }),
+  resetAssignment: (assignmentId: string) => request<{ topology: Topology }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/reset`, { method: 'POST', body: '{}' }),
   saveAssignmentTopology: (assignmentId: string, topology: Topology) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/topology`, { method: 'PUT', body: JSON.stringify({ topology }) }),
   submitAssignment: (assignmentId: string) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/submit`, { method: 'POST', body: '{}' }),
   studentRuntime: (assignmentId: string) => request<{ status: Assignment['runtime_status']; expires_at: number | null; nodes: StatusNode[] }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime`),
