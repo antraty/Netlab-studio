@@ -1,5 +1,9 @@
 # Migration — FastAPI + Vue
 
+- [x] Ajouter un profil Docker Compose reproductible avec PostgreSQL, control plane, worker Docker et frontend Nginx.
+- [x] Ne monter le socket Docker que dans le worker et proxyfier l’API/ WebSocket depuis le frontend.
+- [x] Ajouter les Dockerfiles, healthchecks, commandes Makefile et guide de déploiement de la stack.
+- [x] Ajouter des contrats statiques de déploiement et vérifier les tests Python ainsi que le build Vue.
 - [x] Exposer la topologie, les états, les logs et les actions via FastAPI.
 - [x] Valider les topologies avec des modèles Pydantic.
 - [x] Conserver l’orchestrateur indépendant du transport HTTP.

@@ -593,3 +593,15 @@ Puis ouvrir `http://127.0.0.1:5173` pour piloter le laboratoire, consulter les �
 L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Les connexions WebSocket contrôlent l’origine et l’identité ; en production, une origine HTTPS autorisée est obligatoire.
 
 L’éditeur visuel est disponible : les nœuds peuvent être déplacés, ajoutés, supprimés ou reliés, puis sauvegardés dans la topologie JSON. Pour les topologies v2, les panneaux de configuration permettent d’ajouter ou supprimer des segments, de modifier leurs sous-réseaux, de gérer les interfaces et les routes du nœud sélectionné, puis d’activer son rôle de routeur. Deux modèles prêts à l’emploi sont proposés : un réseau local Ubuntu–Debian et un scénario de routage statique client–routeur–serveur. Le test de connectivité peut sélectionner ses nœuds et une commande contrôlée. Une validation locale signale les références, adresses et routes incohérentes et bloque la sauvegarde, le déploiement ou la vérification tant que le problème n’est pas corrigé ; le backend revalide toujours la topologie.
+
+
+## Démarrage reproductible avec Docker Compose
+
+La Tranche 1 fournit un profil Docker Compose pour lancer le frontend, l’API FastAPI, le worker Docker et PostgreSQL :
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+Consulter [`DEPLOYMENT.md`](DEPLOYMENT.md) pour les prérequis, la construction des images de laboratoire, le flux réseau, le bootstrap du premier enseignant et les précautions avant une exposition publique. Le profil local expose uniquement `http://localhost:8080`; le socket Docker reste monté uniquement dans le worker.

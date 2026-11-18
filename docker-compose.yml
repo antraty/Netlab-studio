@@ -1,0 +1,97 @@
+name: netlab-studio
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-netlab}
+      POSTGRES_USER: ${POSTGRES_USER:-netlab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netlab-development-only}
+    volumes:
+      - netlab-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [netlab-internal]
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    restart: unless-stopped
+    environment:
+      NETLAB_ENV: ${NETLAB_ENV:-development}
+      NETLAB_WORKER_TOKEN: ${NETLAB_WORKER_TOKEN:-change-me-in-development}
+      NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0}
+      NETLAB_WORKER_CONTAINER: "true"
+      NETLAB_WORKER_HOST: 0.0.0.0
+      NETLAB_WORKER_PORT: 9000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose: ["9000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [netlab-internal]
+
+  control:
+    build:
+      context: .
+      dockerfile: docker/control.Dockerfile
+    restart: unless-stopped
+    environment:
+      NETLAB_ENV: ${NETLAB_ENV:-development}
+      NETLAB_DATABASE_URL: postgresql://${POSTGRES_USER:-netlab}:${POSTGRES_PASSWORD:-netlab-development-only}@db:5432/${POSTGRES_DB:-netlab}?sslmode=disable
+      NETLAB_DATA_DIR: /data/netlab
+      NETLAB_TOPOLOGY: /app/topology.json
+      NETLAB_WORKER_URL: http://worker:9000
+      NETLAB_WORKER_TOKEN: ${NETLAB_WORKER_TOKEN:-change-me-in-development}
+      NETLAB_ALLOWED_ORIGINS: ${NETLAB_ALLOWED_ORIGINS:-http://localhost:8080}
+      NETLAB_ALLOWED_HOSTS: ${NETLAB_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      NETLAB_COOKIE_SECURE: ${NETLAB_COOKIE_SECURE:-false}
+      NETLAB_BOOTSTRAP_TOKEN: ${NETLAB_BOOTSTRAP_TOKEN:-}
+      NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0}
+    volumes:
+      - netlab-data:/data/netlab
+    expose: ["8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [netlab-internal]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${NETLAB_HTTP_PORT:-8080}:80"
+    depends_on:
+      control:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [netlab-internal]
+
+volumes:
+  netlab-postgres:
+  netlab-data:
+
+networks:
+  netlab-internal:
+    driver: bridge
