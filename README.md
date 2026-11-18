@@ -420,6 +420,12 @@ Cette étape est couverte par le prototype Docker actuel.
 - Étudier les appliances pfSense et MikroTik.
 - Étudier Windows Server et Active Directory lorsque l’infrastructure le permettra.
 
+#### Première tranche locale
+
+Le catalogue `GET /api/services` décrit les images, catégories, ports, ressources, variables d’environnement et contraintes. Dans cette première tranche, seuls **Nginx** et **Apache HTTP Server** sont ajoutables/déployables depuis le catalogue. Les conteneurs ont des limites par défaut (512 Mo, 0,5 CPU et 128 processus pour ces deux profils ; 512 Mo, 1 CPU et 256 processus pour les nœuds personnalisés). Un port hôte facultatif est toujours lié à `127.0.0.1`, jamais à toutes les interfaces.
+
+CoreDNS, DHCP/dnsmasq, PostgreSQL, MySQL, MongoDB, WordPress, Jenkins, GitLab et Laravel sont documentés dans le catalogue mais marqués **prévus** : il manque notamment le stockage persistant, la gestion des secrets, la configuration réseau adaptée ou des limites de ressources dédiées. pfSense, MikroTik CHR et Windows Server/Active Directory restent au stade d’étude VM/KVM et de vérification de licence. Les liens de topologie restent graphiques et le prototype ne doit pas être exposé publiquement.
+
 ### Étape 9 — Supervision et observabilité
 
 - Afficher les utilisateurs, nœuds, réseaux, logs et erreurs.
@@ -446,7 +452,7 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Le projet est au stade du **prototype technique local**. L’idée produit et la vision long terme sont définies ; les briques couvrent un laboratoire Docker local, une interface web, des comptes enseignants/étudiants et un flux élémentaire de partage pédagogique. Cela ne constitue pas encore une plateforme multi-utilisateur déployable dans le cloud.
+Le projet est au stade du **prototype technique local**. L’idée produit et la vision long terme sont définies ; les briques couvrent un laboratoire Docker local, une interface web, des comptes enseignants/étudiants, un flux élémentaire de partage pédagogique et un premier catalogue de services web. Cela ne constitue pas encore une plateforme multi-utilisateur déployable dans le cloud.
 
 La cible reste plus large : **un client Ubuntu et un serveur Debian reliés dans un réseau Docker, déployables depuis une interface web et accessibles via des terminaux dans le navigateur**, puis des laboratoires multi-services, des machines virtuelles, le partage pédagogique, la supervision et l’exécution dans le cloud.
 

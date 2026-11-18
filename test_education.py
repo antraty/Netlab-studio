@@ -89,6 +89,9 @@ class EducationApiTests(unittest.TestCase):
             "bootstrap_token": "test-setup-secret", "email": "teacher@example.test",
             "display_name": "Teacher", "password": "long-password-123",
         })
+        response = self.client.get("/api/services")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache"})
         response = self.client.post("/api/education/groups", json={"name": "No CSRF"})
         self.assertEqual(response.status_code, 403)
 

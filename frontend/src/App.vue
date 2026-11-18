@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
-import type { Assignment, Group, User } from './api'
+import type { Assignment, Group, ServiceProfile, User } from './api'
 import type { Node, StatusNode, Topology, VersionInfo } from './types'
 
 const user = ref<User | null>(null)
@@ -27,6 +27,8 @@ const terminalCommand = ref('hostname')
 const terminalSocket = ref<WebSocket | null>(null)
 const groups = ref<Group[]>([])
 const users = ref<User[]>([])
+const serviceCatalog = ref<ServiceProfile[]>([])
+const selectedServiceId = ref('nginx')
 const submissions = ref<Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; submitted_at: number | null }>>([])
 const assignments = ref<Assignment[]>([])
 const activeAssignmentId = ref('')
@@ -42,6 +44,7 @@ let timer: number | undefined
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
+const deployableServices = computed(() => serviceCatalog.value.filter(profile => profile.deployable))
 function nodeStatus(name: string) { return statuses.value.find(node => node.name === name)?.state ?? 'inconnu' }
 function showError(error: unknown) { pageError.value = error instanceof Error ? error.message : 'Erreur inconnue' }
 
@@ -84,8 +87,9 @@ async function logout() {
 }
 
 async function loadEducation() {
-  const [groupResponse, userResponse] = await Promise.all([api.groups(), api.users()])
-  groups.value = groupResponse.groups; users.value = userResponse.users
+  const [groupResponse, userResponse, servicesResponse] = await Promise.all([api.groups(), api.users(), api.services()])
+  groups.value = groupResponse.groups; users.value = userResponse.users; serviceCatalog.value = servicesResponse.services
+  if (!deployableServices.value.some(profile => profile.id === selectedServiceId.value)) selectedServiceId.value = deployableServices.value[0]?.id ?? ''
   if (!selectedGroupId.value || !groups.value.some(group => group.id === selectedGroupId.value)) selectedGroupId.value = groups.value[0]?.id ?? ''
   await loadSubmissions()
 }
@@ -192,6 +196,37 @@ function addNode() {
   topology.value.nodes.push({ name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 } })
   selected.value = name; dirty.value = true
 }
+function addCatalogService() {
+  if (!topology.value) return
+  const profile = deployableServices.value.find(item => item.id === selectedServiceId.value)
+  if (!profile?.image) return
+  const name = window.prompt('Nom du nœud :', `${profile.id}-${topology.value.nodes.length + 1}`)
+  if (!name) return
+  if (topology.value.nodes.some(node => node.name === name)) { pageError.value = 'Ce nom de nœud existe déjà.'; return }
+  let publishedPort: number | undefined
+  if (profile.primary_port) {
+    const rawPort = window.prompt(`Port hôte facultatif lié seulement à 127.0.0.1 (port du conteneur ${profile.primary_port}). Vide = réseau Docker uniquement.`, '')
+    if (rawPort === null) return
+    if (rawPort.trim()) {
+      const parsed = Number(rawPort)
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) { pageError.value = 'Le port doit être un entier entre 1 et 65535.'; return }
+      if (topology.value.nodes.some(node => node.published_port === parsed)) { pageError.value = 'Ce port hôte est déjà utilisé dans cette topologie.'; return }
+      publishedPort = parsed
+    }
+  }
+  const node: Node = {
+    name, image: profile.image, command: [...profile.command], service_id: profile.id,
+    position: { x: 60 + topology.value.nodes.length * 210, y: 110 },
+  }
+  if (publishedPort !== undefined) node.published_port = publishedPort
+  topology.value.nodes.push(node); selected.value = name; dirty.value = true
+}
+function resourceText(profile: ServiceProfile) {
+  return Object.entries(profile.resources).map(([key, value]) => `${key.replaceAll('_', ' ')} ${value}`).join(' · ')
+}
+function portsText(profile: ServiceProfile) {
+  return profile.ports.map(port => `${port.container_port}/${port.protocol}`).join(', ') || 'aucun port conteneur défini'
+}
 function point(event: PointerEvent) {
   const svg = event.currentTarget as SVGSVGElement
   const rect = svg.getBoundingClientRect()
@@ -271,7 +306,8 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); terminalSocket.value
     <main v-if="topology">
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label></section>
-      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><button class="secondary" @click="addNode">+ Nœud</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Déplacez les nœuds par glisser-déposer. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section class="panel catalog-panel"><div class="section-title"><div><h2>Catalogue de services</h2><span>{{ deployableServices.length }} profils déployables localement · {{ serviceCatalog.length }} documentés</span></div></div><div class="catalog-grid"><article v-for="profile in serviceCatalog" :key="profile.id" class="catalog-card"><div class="catalog-card-head"><h3>{{ profile.label }}</h3><span class="catalog-status" :class="profile.status">{{ profile.status === 'ready' ? 'disponible' : profile.status === 'planned' ? 'prévu' : 'étude' }}</span></div><code>{{ profile.image ?? 'image VM à définir' }}</code><p><strong>Ports :</strong> {{ portsText(profile) }}</p><p><strong>Ressources :</strong> {{ resourceText(profile) }}</p><p v-if="profile.environment.length"><strong>Variables :</strong> {{ profile.environment.map(item => `${item.name}${item.secret ? ' (secret)' : ''}`).join(', ') }}</p><ul><li v-for="constraint in profile.constraints" :key="constraint">{{ constraint }}</li></ul></article></div></section>
       <section class="panel education-panel">
         <div class="section-title"><div><h2>Partage pédagogique</h2><span>Comptes, groupes, affectations et remises</span></div><button class="secondary" @click="loadEducation">Actualiser</button></div>
         <p class="hint">Les étudiants reçoivent un instantané JSON indépendant. Le déploiement reste réservé à l’enseignant tant que l’isolation d’exécution par étudiant n’existe pas.</p>

@@ -14,6 +14,10 @@
 - [x] Protéger les mutations par CSRF et les endpoints d’exécution par rôle enseignant.
 - [x] Ajouter groupes, membres étudiants, instantanés de laboratoires, copies JSON personnelles et suivi des remises.
 - [x] Empêcher le worker Docker d’accepter des jobs lorsqu’aucun jeton n’est configuré.
+- [x] Introduire un catalogue structuré décrivant les services, images, ports, ressources, variables et contraintes.
+- [x] Déployer les premiers profils Nginx et Apache avec limites Docker et publication de port réservée à localhost.
+- [x] Rejeter les profils non disponibles et les modifications d’image/commande d’un profil catalogue.
+- [x] Documenter dans le catalogue les dépendances et limites des services et appliances restant à intégrer.
 - [ ] Ajouter invitations sûres, récupération/réinitialisation de mot de passe et limitation des tentatives.
 - [ ] Ajouter rôles administrateur/enseignant/étudiant plus granulaires, groupes de travail et permissions par laboratoire.
 - [ ] Construire l’édition visuelle des copies étudiantes et des modèles de TP prêts à l’emploi.
@@ -23,3 +27,7 @@
 - [ ] Convertir les liens visuels de topologie en vrais réseaux/interfaces Docker isolés.
 - [ ] Corriger le scénario de démonstration afin que les images disposent de `ping` (ou choisir un test disponible et le documenter).
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
+- [ ] Rendre DNS/CoreDNS et DHCP disponibles après la prise en charge de configurations, segments réseau isolés et droits minimaux.
+- [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
+- [ ] Ajouter WordPress, Jenkins, GitLab et Laravel avec dépendances, limites de ressources, volumes et images épinglées.
+- [ ] Évaluer pfSense, MikroTik CHR et Windows Server/Active Directory sur un moteur VM/KVM avec validation de licences.

@@ -15,6 +15,7 @@ from orchestrator import DockerOrchestrator, Orchestrator, RemoteWorkerOrchestra
 
 from .education import authenticate_websocket, require_teacher, router as education_router
 from .models import CloneRequest, TerminalRequest, Topology, TopologyEnvelope, VersionInfo, VersionsResponse
+from .services import list_services
 from .storage import StorageError, TopologyStore
 from .terminal import TerminalSession
 
@@ -102,6 +103,11 @@ async def validate_browser_origin(request: Request, call_next):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "netlab-control-api"}
+
+
+@app.get("/api/services", dependencies=[Depends(require_teacher)])
+def get_services() -> dict[str, object]:
+    return {"services": list_services()}
 
 
 @app.get("/api/topology", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])

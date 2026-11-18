@@ -21,6 +21,20 @@ export interface Assignment {
   submitted_at: number | null
   topology: Topology
 }
+export interface ServiceProfile {
+  id: string
+  label: string
+  category: string
+  status: 'ready' | 'planned' | 'research'
+  image: string | null
+  command: string[]
+  ports: Array<{ container_port: number; protocol: string; host_publishable: boolean }>
+  primary_port: number | null
+  resources: Record<string, number>
+  environment: Array<{ name: string; required: boolean; secret: boolean; purpose: string }>
+  constraints: string[]
+  deployable: boolean
+}
 
 function cookie(name: string): string | undefined {
   const prefix = `${encodeURIComponent(name)}=`
@@ -43,6 +57,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  services: () => request<{ services: ServiceProfile[] }>('/api/services'),
   authState: () => request<{ has_users: boolean; bootstrap_enabled: boolean }>('/api/auth/state'),
   me: () => request<{ user: User }>('/api/auth/me'),
   login: (email: string, password: string) => request<{ user: User; csrf_token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),

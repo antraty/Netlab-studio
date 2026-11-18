@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from backend.app.services import get_service, validate_catalog_node
+
 
 class TopologyError(ValueError):
     """Raised when a topology is invalid or cannot be operated safely."""
@@ -53,6 +55,7 @@ def validate_topology(topology: dict[str, Any]) -> None:
     if not isinstance(nodes, list) or len(nodes) < 2:
         raise TopologyError("nodes must contain at least two nodes")
     names: set[str] = set()
+    host_ports: set[int] = set()
     for node in nodes:
         if not isinstance(node, dict):
             raise TopologyError("each node must be an object")
@@ -65,6 +68,20 @@ def validate_topology(topology: dict[str, Any]) -> None:
         command = node.get("command", ["sleep", "infinity"])
         if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
             raise TopologyError(f"node {node['name']} command must be a non-empty string list")
+        service_id = node.get("service_id")
+        published_port = node.get("published_port")
+        if service_id is not None and (not isinstance(service_id, str) or not service_id.strip()):
+            raise TopologyError(f"node {node['name']} service_id must be a non-empty string")
+        if published_port is not None and (not isinstance(published_port, int) or isinstance(published_port, bool) or not 1 <= published_port <= 65535):
+            raise TopologyError(f"node {node['name']} published_port must be between 1 and 65535")
+        try:
+            validate_catalog_node(service_id, node["image"], command, published_port)
+        except ValueError as exc:
+            raise TopologyError(str(exc)) from exc
+        if published_port is not None:
+            if published_port in host_ports:
+                raise TopologyError("published host ports must be unique in a topology")
+            host_ports.add(published_port)
         position = node.get("position", {"x": 100, "y": 100})
         if not isinstance(position, dict) or not all(isinstance(position.get(axis), (int, float)) for axis in ("x", "y")):
             raise TopologyError(f"node {node['name']} position must contain numeric x and y")
@@ -111,6 +128,30 @@ def resource_name(topology: dict[str, Any], node_name: str | None = None) -> str
     return f"netlab-{base}" if node_name is None else f"netlab-{base}-{node_name}"
 
 
+def docker_run_args(topology: dict[str, Any], node: dict[str, Any], network_name: str) -> list[str]:
+    """Build a bounded Docker run command; catalog ports bind to loopback only."""
+    profile = get_service(node.get("service_id", ""))
+    resources = profile.resources if profile else {"memory_mb": 512, "cpu_cores": 1, "pids": 256}
+    memory_mb = int(resources["memory_mb"])
+    cpu_cores = float(resources["cpu_cores"])
+    pids = int(resources["pids"])
+    container = resource_name(topology, node["name"])
+    args = [
+        "run", "-d", "--name", container,
+        "--memory", f"{memory_mb}m",
+        "--cpus", f"{cpu_cores:g}",
+        "--pids-limit", str(pids),
+        "--network", network_name,
+        "--label", "io.netlab.studio.lab=" + topology["lab"],
+    ]
+    if profile:
+        args += ["--label", "io.netlab.studio.service=" + profile.id]
+        if node.get("published_port") is not None:
+            args += ["--publish", f"127.0.0.1:{node['published_port']}:{profile.primary_port}/tcp"]
+    args += [node["image"], *node.get("command", ["sleep", "infinity"])]
+    return args
+
+
 def deploy(topology: dict[str, Any]) -> int:
     network = topology["network"]
     network_name = resource_name(topology) + "-network"
@@ -131,11 +172,7 @@ def deploy(topology: dict[str, Any]) -> int:
     for node in topology["nodes"]:
         container = resource_name(topology, node["name"])
         docker("rm", "-f", container, capture=True)
-        result = docker(
-            "run", "-d", "--name", container, "--network", network_name,
-            "--label", "io.netlab.studio.lab=" + topology["lab"],
-            node["image"], *node.get("command", ["sleep", "infinity"]), capture=True,
-        )
+        result = docker(*docker_run_args(topology, node, network_name), capture=True)
         if result.returncode:
             print(f"failed to start {node['name']}: {result.stderr.strip()}", file=sys.stderr)
             return result.returncode
