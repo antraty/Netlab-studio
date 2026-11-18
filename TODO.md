@@ -34,7 +34,7 @@
 - [x] Introduire la topologie v2 avec plusieurs segments Docker, interfaces IPv4 et routes statiques.
 - [x] Déployer un scénario client–routeur–serveur avec forwarding IPv4 réel.
 - [x] Ajouter des images Ubuntu/Debian de laboratoire contenant `ip`, `ping` et les outils réseau.
-- [ ] Ajouter dans l’éditeur Vue la configuration interactive des réseaux, interfaces, IP et routes v2.
+- [x] Ajouter dans l’éditeur Vue la configuration interactive des réseaux, interfaces, IP et routes v2, avec ajout/suppression contrôlée et activation du mode routeur.
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
 - [ ] Rendre DNS/CoreDNS et DHCP disponibles après la prise en charge de configurations, segments réseau isolés et droits minimaux.
 - [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.

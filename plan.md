@@ -9,6 +9,7 @@ Remplacer progressivement le serveur `http.server` et l’interface JavaScript v
 - `backend/app/` contient le plan de contrôle HTTP et les modèles Pydantic.
 - `orchestrator.py` reste le plan d’exécution et l’adaptateur Docker.
 - `frontend/` contient l’éditeur et consomme uniquement l’API HTTP.
+- Pour les topologies v2, l’éditeur expose directement les segments Docker, les interfaces IPv4 et les routes statiques ; la validation serveur reste l’autorité avant sauvegarde ou déploiement.
 - L’ancien serveur HTTP et l’ancienne interface vanilla ont été supprimés après validation de la stack migrée.
 - La persistance fichier JSON est conservée pour le prototype ; PostgreSQL sera ajouté quand les utilisateurs et laboratoires multiples seront introduits.
 

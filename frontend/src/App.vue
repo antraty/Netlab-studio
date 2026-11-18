@@ -51,6 +51,7 @@ const selectedNode = computed(() => topology.value?.nodes.find(node => node.name
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
 const deployableServices = computed(() => serviceCatalog.value.filter(profile => profile.deployable))
+const topologyNetworks = computed(() => topology.value?.networks ?? [])
 function nodeStatus(name: string) { return statuses.value.find(node => node.name === name)?.state ?? 'inconnu' }
 function showError(error: unknown) { pageError.value = error instanceof Error ? error.message : 'Erreur inconnue' }
 
@@ -200,6 +201,51 @@ function removeSelected() {
   topology.value.nodes = topology.value.nodes.filter(node => node.name !== selected.value)
   topology.value.links = topology.value.links.filter(link => link.from !== selected.value && link.to !== selected.value)
   selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = true
+}
+function addNetwork() {
+  if (!topology.value || topology.value.version < 2) return
+  const name = window.prompt('Nom du segment réseau :', `lan-${(topology.value.networks?.length ?? 0) + 1}`)
+  const subnet = window.prompt('Sous-réseau IPv4 CIDR :', `10.0.${(topology.value.networks?.length ?? 0) + 1}.0/24`)
+  if (!name || !subnet) return
+  if (topology.value.networks?.some(network => network.name === name)) { pageError.value = 'Ce segment existe déjà.'; return }
+  topology.value.networks ??= []
+  topology.value.networks.push({ name, driver: 'bridge', subnet })
+  dirty.value = true
+}
+function removeNetwork(networkName: string) {
+  if (!topology.value?.networks || topology.value.networks.length <= 1) return
+  if (topology.value.nodes.some(node => node.interfaces?.some(item => item.network === networkName))) {
+    pageError.value = 'Impossible de supprimer un segment encore utilisé par une interface.'
+    return
+  }
+  topology.value.networks = topology.value.networks.filter(network => network.name !== networkName)
+  dirty.value = true
+}
+function addInterface(node: Node) {
+  if (!topology.value || topology.value.version < 2) return
+  const networks = topology.value.networks ?? []
+  const usedNetworks = new Set((node.interfaces ?? []).map(item => item.network))
+  const network = networks.find(item => !usedNetworks.has(item.name)) ?? networks[0]
+  if (!network) return
+  node.interfaces ??= []
+  const index = node.interfaces.length
+  node.interfaces.push({ name: `eth${index}`, network: network.name })
+  dirty.value = true
+}
+function removeInterface(node: Node, index: number) {
+  if (!node.interfaces || node.interfaces.length <= 1) return
+  node.interfaces.splice(index, 1)
+  dirty.value = true
+}
+function addRoute(node: Node) {
+  node.routes ??= []
+  node.routes.push({ destination: '0.0.0.0/0', via: '' })
+  dirty.value = true
+}
+function removeRoute(node: Node, index: number) {
+  if (!node.routes) return
+  node.routes.splice(index, 1)
+  dirty.value = true
 }
 function addNode() {
   if (!topology.value) return
@@ -357,6 +403,38 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
       <template v-if="topology">
       <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label></section>
       <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section v-if="topology.version >= 2" class="panel topology-config">
+        <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
+        <div class="network-editor-grid">
+          <article v-for="network in topologyNetworks" :key="network.name" class="nested network-editor-card">
+            <div class="card-heading"><strong>{{ network.name }}</strong><button v-if="topologyNetworks.length > 1" class="icon-button danger" @click="removeNetwork(network.name)">Supprimer</button></div>
+            <label>Nom du segment (identifiant)<input :value="network.name" readonly /></label>
+            <label>Sous-réseau IPv4<input v-model="network.subnet" placeholder="10.0.1.0/24" @input="dirty = true" /></label>
+          </article>
+        </div>
+        <div v-if="selectedNode" class="node-config">
+          <div class="section-title"><div><h3>Nœud sélectionné : {{ selectedNode.name }}</h3><span>configuration de ses interfaces et routes</span></div><button class="secondary" @click="addInterface(selectedNode)">Ajouter une interface</button></div>
+          <label class="router-toggle"><input v-model="selectedNode.router" type="checkbox" @change="selectedNode.type = selectedNode.router ? 'router' : 'linux'; dirty = true" /> Activer le forwarding IPv4 et les capacités routeur</label>
+          <div class="interface-list">
+            <div v-for="(interfaceItem, index) in selectedNode.interfaces" :key="`${selectedNode.name}-${index}`" class="interface-row">
+              <input v-model="interfaceItem.name" aria-label="Nom de l’interface" placeholder="eth0" @input="dirty = true" />
+              <select v-model="interfaceItem.network" aria-label="Segment de l’interface" @change="dirty = true"><option v-for="network in topologyNetworks" :key="network.name" :value="network.name">{{ network.name }}</option></select>
+              <input v-model="interfaceItem.ipv4" aria-label="Adresse IPv4" placeholder="10.0.1.10/24" @input="dirty = true" />
+              <input v-model="interfaceItem.gateway" aria-label="Passerelle" placeholder="Passerelle facultative" @input="dirty = true" />
+              <button class="icon-button danger" :disabled="(selectedNode.interfaces?.length ?? 0) <= 1" @click="removeInterface(selectedNode, index)">×</button>
+            </div>
+          </div>
+          <div class="section-title routes-heading"><div><h3>Routes statiques</h3><span>appliquées au déploiement Docker</span></div><button class="secondary" @click="addRoute(selectedNode)">Ajouter une route</button></div>
+          <div class="route-list">
+            <div v-for="(route, index) in selectedNode.routes" :key="`${selectedNode.name}-route-${index}`" class="interface-row">
+              <input v-model="route.destination" aria-label="Destination de la route" placeholder="0.0.0.0/0" @input="dirty = true" />
+              <input v-model="route.via" aria-label="Passerelle de la route" placeholder="10.0.1.1" @input="dirty = true" />
+              <button class="icon-button danger" @click="removeRoute(selectedNode, index)">×</button>
+            </div>
+          </div>
+        </div>
+        <p v-else class="hint">Sélectionnez un nœud dans le graphe pour modifier ses interfaces et ses routes.</p>
+      </section>
       <section class="panel catalog-panel"><div class="section-title"><div><h2>Catalogue de services</h2><span>{{ deployableServices.length }} profils déployables localement · {{ serviceCatalog.length }} documentés</span></div></div><div class="catalog-grid"><article v-for="profile in serviceCatalog" :key="profile.id" class="catalog-card"><div class="catalog-card-head"><h3>{{ profile.label }}</h3><span class="catalog-status" :class="profile.status">{{ profile.status === 'ready' ? 'disponible' : profile.status === 'planned' ? 'prévu' : 'étude' }}</span></div><code>{{ profile.image ?? 'image VM à définir' }}</code><p><strong>Ports :</strong> {{ portsText(profile) }}</p><p><strong>Ressources :</strong> {{ resourceText(profile) }}</p><p v-if="profile.environment.length"><strong>Variables :</strong> {{ profile.environment.map(item => `${item.name}${item.secret ? ' (secret)' : ''}`).join(', ') }}</p><ul><li v-for="constraint in profile.constraints" :key="constraint">{{ constraint }}</li></ul></article></div></section>
       <section class="panel education-panel">
         <div class="section-title"><div><h2>Partage pédagogique</h2><span>Comptes, groupes, affectations et remises</span></div><button class="secondary" @click="loadEducation">Actualiser</button></div>
