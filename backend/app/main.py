@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 import netlab
@@ -29,6 +30,15 @@ from .models import (
     VersionsResponse,
 )
 from .services import list_services
+from .security import (
+    BodySizeLimitMiddleware,
+    SecurityHeadersMiddleware,
+    configured_hosts,
+    configured_origins,
+    production_mode,
+    validate_production_settings,
+    validate_production_topology,
+)
 from .storage import StorageError, TopologyStore
 from .terminal import TerminalSession
 
@@ -39,7 +49,10 @@ logger = logging.getLogger(__name__)
 
 
 def build_orchestrator(topology: dict) -> Orchestrator:
+    validate_production_topology(topology)
     worker_url = os.getenv("NETLAB_WORKER_URL")
+    if production_mode() and not worker_url:
+        raise RuntimeError("production execution must use the isolated remote worker")
     if worker_url:
         return RemoteWorkerOrchestrator(topology, worker_url, os.getenv("NETLAB_WORKER_TOKEN", ""))
     return DockerOrchestrator(topology)
@@ -122,6 +135,7 @@ def expire_laboratories() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    validate_production_settings()
     await asyncio.to_thread(expire_laboratories)
 
     async def expiry_worker() -> None:
@@ -140,11 +154,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             pass
 
 
-app = FastAPI(title="Netlab Studio Control API", version="0.6.0", lifespan=lifespan)
-allowed_origins = [origin.strip() for origin in os.getenv(
-    "NETLAB_ALLOWED_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000",
-).split(",") if origin.strip()]
+app = FastAPI(
+    title="Netlab Studio Control API",
+    version="0.6.0",
+    lifespan=lifespan,
+    docs_url=None if production_mode() else "/docs",
+    redoc_url=None if production_mode() else "/redoc",
+    openapi_url=None if production_mode() else "/openapi.json",
+)
+allowed_origins = configured_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -152,6 +170,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=["Content-Type", "X-Netlab-CSRF"],
 )
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=2 * 1024 * 1024)
+app.add_middleware(SecurityHeadersMiddleware)
+if production_mode():
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=configured_hosts())
 app.include_router(education_router, prefix="/api")
 
 
@@ -160,6 +182,8 @@ async def validate_browser_origin(request: Request, call_next):
     origin = request.headers.get("origin")
     if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin not in allowed_origins:
         return JSONResponse(status_code=403, content={"detail": "origin is not allowed"})
+    if production_mode() and request.method not in {"GET", "HEAD", "OPTIONS"} and not origin:
+        return JSONResponse(status_code=403, content={"detail": "origin header is required"})
     return await call_next(request)
 
 
@@ -591,12 +615,18 @@ def run_terminal(node_name: str, request: TerminalRequest, user: dict[str, str] 
 @app.websocket("/ws/nodes/{node_name}/terminal")
 async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
     origin = websocket.headers.get("origin")
-    if origin and origin not in allowed_origins:
+    if (production_mode() and not origin) or (origin and origin not in allowed_origins):
         await websocket.close(code=1008, reason="origin is not allowed")
         return
     user = authenticate_websocket(websocket.cookies.get("netlab_session"))
     if not user:
         await websocket.close(code=1008, reason="authentication required")
+        return
+    if production_mode() and (
+        user["role"] == "student"
+        or os.getenv("NETLAB_ENABLE_INTERACTIVE_TERMINAL", "").lower() not in {"1", "true", "yes"}
+    ):
+        await websocket.close(code=1008, reason="interactive terminal is disabled in production")
         return
     assignment_id = websocket.query_params.get("assignment_id")
     laboratory_id = websocket.query_params.get("laboratory_id")
@@ -648,6 +678,10 @@ async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
                     command = receive_task.result()
                 except WebSocketDisconnect:
                     break
+                if len(command.encode("utf-8")) > 4096:
+                    await websocket.send_text("terminal input exceeds the 4096-byte limit\n")
+                    receive_task = asyncio.create_task(websocket.receive_text())
+                    continue
                 session.write(command)
                 if laboratory_id is not None:
                     await asyncio.to_thread(

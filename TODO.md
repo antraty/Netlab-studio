@@ -24,7 +24,10 @@
 - [ ] Ajouter invitations sûres, récupération/réinitialisation de mot de passe et limitation des tentatives.
 - [ ] Ajouter rôles administrateur/enseignant/étudiant plus granulaires, groupes de travail et permissions par laboratoire.
 - [x] Ajouter les identifiants UUID de laboratoire, rôles `owner`/`editor`/`viewer`, API d’exécution isolée par ID et sélection de plusieurs laboratoires.
-- [ ] Construire l’édition visuelle des copies étudiantes et des modèles de TP prêts à l’emploi.
+- [x] Ajouter un éditeur visuel étudiant pour les interfaces IPv4, passerelles et routes statiques.
+- [x] Affecter les modèles LAN et routage statique avec consignes et critères de réussite.
+- [x] Historiser chaque remise avec instantané de topologie et permettre un retour enseignant par tentative.
+- [x] Tester l’isolation des copies de deux étudiants, l’historique individuel et les permissions de retour enseignant.
 - [x] Isoler l’exécution Docker par étudiant/affectation ; limiter déploiement, arrêt, reset, terminal et remise à la copie autorisée.
 - [x] Ajouter PostgreSQL configurable et un outil de copie SQLite vers PostgreSQL pour les comptes, sessions, affectations et versions de topologie.
 - [x] Appliquer des quotas de laboratoires/nœuds, CPU/mémoire/stockage par laboratoire et CPU/mémoire par utilisateur actif.

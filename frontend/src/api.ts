@@ -20,7 +20,32 @@ export interface Assignment {
   runtime_status: 'stopped' | 'running' | 'expired' | 'failed'
   created_at: number
   submitted_at: number | null
+  instructions: string
+  criteria: string[]
+  attempt_count: number
+  feedback: string | null
   topology: Topology
+}
+export interface SubmissionAttempt {
+  id: string
+  attempt: number
+  topology: Topology
+  submitted_at: number
+  feedback: string | null
+  reviewed_at: number | null
+  reviewed_by?: string | null
+}
+export interface GroupSubmission {
+  assignment_id: string
+  student_id: string
+  title: string
+  email: string
+  display_name: string
+  status: string
+  runtime_status: string
+  submitted_at: number | null
+  attempt_count: number
+  feedback: string | null
 }
 export interface Laboratory {
   id: string
@@ -156,8 +181,11 @@ export const api = {
   groups: () => request<{ groups: Group[] }>('/api/education/groups'),
   createGroup: (name: string) => request<{ group: Group }>('/api/education/groups', { method: 'POST', body: JSON.stringify({ name }) }),
   addMember: (groupId: string, email: string) => request<{ ok: boolean }>(`/api/education/groups/${encodeURIComponent(groupId)}/members`, { method: 'POST', body: JSON.stringify({ email }) }),
-  assign: (groupId: string, title: string, topology: Topology) => request<{ assignment: { id: string; title: string } }>(`/api/education/groups/${encodeURIComponent(groupId)}/assignments`, { method: 'POST', body: JSON.stringify({ title, topology }) }),
-  submissions: (groupId: string) => request<{ submissions: Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; runtime_status: string; submitted_at: number | null }> }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
+  assign: (groupId: string, payload: { title: string; topology: Topology; instructions: string; criteria: string[] }) => request<{ assignment: { id: string; title: string } }>(`/api/education/groups/${encodeURIComponent(groupId)}/assignments`, { method: 'POST', body: JSON.stringify(payload) }),
+  submissions: (groupId: string) => request<{ submissions: GroupSubmission[] }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
+  studentSubmissionHistory: (assignmentId: string) => request<{ submissions: SubmissionAttempt[] }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/submissions`),
+  teacherSubmissionHistory: (assignmentId: string, studentId: string) => request<{ submissions: SubmissionAttempt[] }>(`/api/education/assignments/${encodeURIComponent(assignmentId)}/students/${encodeURIComponent(studentId)}/submissions`),
+  reviewSubmission: (assignmentId: string, studentId: string, submissionId: string, feedback: string) => request<{ ok: boolean }>(`/api/education/assignments/${encodeURIComponent(assignmentId)}/students/${encodeURIComponent(studentId)}/submissions/${encodeURIComponent(submissionId)}/feedback`, { method: 'POST', body: JSON.stringify({ feedback }) }),
   myAssignments: () => request<{ assignments: Assignment[] }>('/api/education/my-assignments'),
   cloneAssignment: (assignmentId: string) => request<{ topology: Topology }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/clone`, { method: 'POST', body: '{}' }),
   saveAssignmentTopology: (assignmentId: string, topology: Topology) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/topology`, { method: 'PUT', body: JSON.stringify({ topology }) }),

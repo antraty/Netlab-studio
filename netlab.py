@@ -246,9 +246,11 @@ def validate_topology(topology: dict[str, Any]) -> None:
         raise TopologyError(f"connectivity_check.command must start with one of: {allowed}")
 
 
-def docker(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def docker(*args: str, capture: bool = False, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(["docker", *args], check=False, text=True, capture_output=capture)
+        return subprocess.run(
+            ["docker", *args], check=False, text=True, capture_output=capture, timeout=timeout,
+        )
     except FileNotFoundError:
         return subprocess.CompletedProcess(["docker", *args], 127, "", "Docker CLI is not installed or is not available in PATH")
 
@@ -346,6 +348,7 @@ def docker_run_args(topology: dict[str, Any], node: dict[str, Any], network_name
     container = resource_name(topology, node["name"])
     args = [
         "run", "-d", "--name", container,
+        "--security-opt", "no-new-privileges:true",
         "--memory", f"{int(resources['memory_mb'])}m",
         "--cpus", f"{float(resources['cpu_cores']):g}",
         "--pids-limit", str(int(resources["pids"])),

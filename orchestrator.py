@@ -7,7 +7,10 @@ added without changing the HTTP API.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
+import subprocess
 import urllib.error
 import urllib.request
 import uuid
@@ -64,19 +67,98 @@ class DockerOrchestrator:
         ]
 
     def terminal(self, node_name: str, command: list[str]) -> ActionResult:
-        if not command or command[0] not in self.ALLOWED_TERMINAL_COMMANDS:
-            allowed = ", ".join(sorted(self.ALLOWED_TERMINAL_COMMANDS))
-            raise ValueError(f"allowed terminal commands: {allowed}")
+        self._validate_terminal_command(command)
         names = {node["name"] for node in self.topology["nodes"]}
         if node_name not in names:
             raise ValueError(f"unknown node: {node_name}")
-        result = netlab.docker("exec", netlab.resource_name(self.topology, node_name), *command, capture=True)
+        safe_command = list(command)
+        if command[0] == "ping":
+            if "-4" not in safe_command[1:]:
+                safe_command.insert(1, "-4")
+            if "-c" not in safe_command[1:]:
+                safe_command.extend(["-c", "1"])
+            if "-W" not in safe_command[1:]:
+                safe_command.extend(["-W", "2"])
+        try:
+            result = netlab.docker(
+                "exec", netlab.resource_name(self.topology, node_name), *safe_command,
+                capture=True, timeout=15,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or b""
+            if isinstance(output, bytes):
+                output = output.decode(errors="replace")
+            return ActionResult(False, f"terminal:{node_name}", 124, (output + "\ncommand timed out").strip()[-65536:])
         return ActionResult(
             result.returncode == 0,
             f"terminal:{node_name}",
             result.returncode,
-            (result.stdout + result.stderr).strip(),
+            (result.stdout + result.stderr).strip()[-65536:],
         )
+
+    @classmethod
+    def _validate_terminal_command(cls, command: list[str]) -> None:
+        if (
+            not command
+            or len(command) > 8
+            or any(not isinstance(item, str) or len(item) > 256 for item in command)
+            or sum(len(item) for item in command) > 4096
+        ):
+            raise ValueError("terminal command must contain at most 8 bounded arguments")
+        if command[0] == "hostname" and len(command) == 1:
+            return
+        if command[0] == "uname" and command[1:] in ([], ["-a"], ["-s"], ["-r"], ["-m"]):
+            return
+        if command[0] == "ip" and len(command) <= 4 and all(
+            item in {"-4", "-brief", "addr", "address", "route", "link", "show"}
+            for item in command[1:]
+        ):
+            return
+        if command[0] == "ping":
+            cls._validate_ping(command[1:])
+            return
+        allowed = ", ".join(sorted(cls.ALLOWED_TERMINAL_COMMANDS))
+        raise ValueError(f"allowed terminal commands and safe arguments: {allowed}")
+
+    @staticmethod
+    def _validate_ping(arguments: list[str]) -> None:
+        destination: str | None = None
+        index = 0
+        while index < len(arguments):
+            item = arguments[index]
+            if item in {"-4", "-n"}:
+                index += 1
+                continue
+            if item in {"-c", "-W"} and index + 1 < len(arguments):
+                try:
+                    value = int(arguments[index + 1])
+                except ValueError as exc:
+                    raise ValueError("ping count and timeout must be integers") from exc
+                if item == "-c":
+                    if not 1 <= value <= 3:
+                        raise ValueError("ping count must be between 1 and 3")
+                else:
+                    if not 1 <= value <= 3:
+                        raise ValueError("ping timeout must be between 1 and 3 seconds")
+                index += 2
+                continue
+            if destination is not None or item.startswith("-"):
+                raise ValueError("ping accepts only a bounded count, timeout, and one destination")
+            destination = item
+            index += 1
+        if destination is None:
+            raise ValueError("ping requires a destination")
+        try:
+            address = ipaddress.ip_address(destination)
+        except ValueError:
+            if len(destination) > 253 or not re.fullmatch(
+                r"(?i)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*",
+                destination,
+            ):
+                raise ValueError("ping destination must be an IP address or hostname")
+        else:
+            if address.version != 4:
+                raise ValueError("ping destination must be IPv4")
 
     def container_name(self, node_name: str) -> str:
         names = {node["name"] for node in self.topology["nodes"]}

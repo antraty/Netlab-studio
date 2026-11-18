@@ -83,6 +83,7 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(creates[0][creates[0].index("--gateway") + 1], "10.0.1.254")
         client = topology["nodes"][0]
         client_args = docker_run_args(topology, client, "netlab-test-lan")
+        self.assertIn("no-new-privileges:true", client_args)
         self.assertIn("--cap-add", client_args)
         self.assertIn("NET_ADMIN", client_args)
         self.assertNotIn("net.ipv4.ip_forward=1", client_args)

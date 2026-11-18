@@ -23,6 +23,19 @@ class OrchestratorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DockerOrchestrator(self.topology).terminal("client-ubuntu", ["sh", "-c", "id"])
 
+    def test_terminal_bounds_ping_and_only_allows_read_only_network_commands(self):
+        DockerOrchestrator._validate_terminal_command(["ping", "-c", "3", "-W", "2", "10.0.2.10"])
+        DockerOrchestrator._validate_terminal_command(["ip", "-4", "route", "show"])
+        for command in (
+            ["ping", "-f", "10.0.2.10"],
+            ["ping", "-c", "0", "10.0.2.10"],
+            ["ping", "-c", "5", "10.0.2.10"],
+            ["ping", "2001:db8::1"],
+            ["ip", "route", "add", "default"],
+        ):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                DockerOrchestrator._validate_terminal_command(command)
+
     def test_invalid_topology_is_rejected_at_orchestrator_boundary(self):
         invalid = dict(self.topology)
         invalid["nodes"] = []
