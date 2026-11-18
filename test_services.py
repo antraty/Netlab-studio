@@ -43,6 +43,16 @@ class ServiceCatalogTests(unittest.TestCase):
         self.assertIn("127.0.0.1:8088:80/tcp", args)
         self.assertNotIn("0.0.0.0:8088:80/tcp", args)
 
+    def test_router_run_args_enable_forwarding(self):
+        node = self.base_topology["nodes"][1]
+        args = docker_run_args(self.base_topology, node, "lan-a-runtime", node["interfaces"][0])
+        self.assertIn("--cap-add", args)
+        self.assertIn("NET_ADMIN", args)
+        self.assertIn("--sysctl", args)
+        self.assertIn("net.ipv4.ip_forward=1", args)
+        self.assertIn("--ip", args)
+        self.assertIn("10.0.1.1", args)
+
     def test_unavailable_profiles_and_modified_images_are_rejected(self):
         topology, _ = self.nginx_topology()
         topology["nodes"][0]["service_id"] = "postgresql"

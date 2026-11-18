@@ -16,7 +16,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_docker_status_is_reported_without_crashing_when_unavailable(self):
         nodes = DockerOrchestrator(self.topology).status()
-        self.assertEqual(len(nodes), 2)
+        self.assertEqual(len(nodes), 3)
         self.assertIn(nodes[0]["state"], {"docker-unavailable", "docker-error", "stopped"})
 
     def test_terminal_rejects_arbitrary_shell_commands(self):

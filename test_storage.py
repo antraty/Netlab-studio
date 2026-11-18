@@ -24,7 +24,7 @@ class StorageTests(unittest.TestCase):
         self.store.save(changed)
         versions = self.store.list_versions(self.topology["lab"])
         self.assertEqual([item["version"] for item in versions], [2, 1])
-        self.assertEqual(self.store.load(self.topology["lab"], 1)["nodes"][0]["position"]["x"], 120)
+        self.assertEqual(self.store.load(self.topology["lab"], 1)["nodes"][0]["position"]["x"], 60)
 
     def test_restore_creates_a_new_reproducible_version(self):
         self.store.save(self.topology)
@@ -32,7 +32,7 @@ class StorageTests(unittest.TestCase):
         changed["nodes"][0]["position"]["x"] = 300
         self.store.save(changed)
         restored = self.store.restore(self.topology["lab"], 1)
-        self.assertEqual(restored["nodes"][0]["position"]["x"], 120)
+        self.assertEqual(restored["nodes"][0]["position"]["x"], 60)
         self.assertEqual(self.store.list_versions(self.topology["lab"])[0]["reason"], "restore:1")
 
     def test_clone_and_export(self):

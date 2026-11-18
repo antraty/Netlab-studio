@@ -1,49 +1,65 @@
 {
-  "version": 1,
-  "lab": "linux-ping-demo",
-  "network": {
-    "name": "netlab-demo",
-    "driver": "bridge",
-    "subnet": "172.30.0.0/24"
-  },
+  "version": 2,
+  "lab": "static-routing-demo",
+  "networks": [
+    {
+      "name": "lan-a",
+      "driver": "bridge",
+      "subnet": "10.0.1.0/24"
+    },
+    {
+      "name": "lan-b",
+      "driver": "bridge",
+      "subnet": "10.0.2.0/24"
+    }
+  ],
   "nodes": [
     {
       "name": "client-ubuntu",
-      "image": "ubuntu:24.04",
-      "command": [
-        "sleep",
-        "infinity"
+      "type": "linux",
+      "image": "netlab/ubuntu-lab:24.04",
+      "command": ["sleep", "infinity"],
+      "position": {"x": 60, "y": 130},
+      "interfaces": [
+        {"name": "eth0", "network": "lan-a", "ipv4": "10.0.1.10/24"}
       ],
-      "position": {
-        "x": 120.0,
-        "y": 130.0
-      }
+      "routes": [
+        {"destination": "10.0.2.0/24", "via": "10.0.1.1"}
+      ]
+    },
+    {
+      "name": "router-linux",
+      "type": "router",
+      "router": true,
+      "image": "netlab/debian-router:bookworm",
+      "command": ["sleep", "infinity"],
+      "position": {"x": 300, "y": 130},
+      "interfaces": [
+        {"name": "eth0", "network": "lan-a", "ipv4": "10.0.1.1/24"},
+        {"name": "eth1", "network": "lan-b", "ipv4": "10.0.2.1/24"}
+      ]
     },
     {
       "name": "server-debian",
-      "image": "debian:bookworm-slim",
-      "command": [
-        "sleep",
-        "infinity"
+      "type": "linux",
+      "image": "netlab/debian-lab:bookworm",
+      "command": ["sleep", "infinity"],
+      "position": {"x": 540, "y": 130},
+      "interfaces": [
+        {"name": "eth0", "network": "lan-b", "ipv4": "10.0.2.10/24"}
       ],
-      "position": {
-        "x": 520.0,
-        "y": 130.0
-      }
+      "routes": [
+        {"destination": "10.0.1.0/24", "via": "10.0.2.1"}
+      ]
     }
   ],
   "connectivity_check": {
     "from": "client-ubuntu",
     "to": "server-debian",
-    "command": [
-      "getent",
-      "server-debian"
-    ]
+    "command": ["ping", "-c", "1", "-W", "2", "10.0.2.10"]
   },
   "links": [
-    {
-      "from": "client-ubuntu",
-      "to": "server-debian"
-    }
+    {"from": "client-ubuntu", "to": "router-linux"},
+    {"from": "router-linux", "to": "server-debian"}
   ]
 }

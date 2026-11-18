@@ -29,6 +29,7 @@ const groups = ref<Group[]>([])
 const users = ref<User[]>([])
 const serviceCatalog = ref<ServiceProfile[]>([])
 const selectedServiceId = ref('nginx')
+const selectedTemplateId = ref('static-routing')
 const submissions = ref<Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; submitted_at: number | null }>>([])
 const assignments = ref<Assignment[]>([])
 const activeAssignmentId = ref('')
@@ -51,6 +52,75 @@ const selectedNode = computed(() => topology.value?.nodes.find(node => node.name
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
 const deployableServices = computed(() => serviceCatalog.value.filter(profile => profile.deployable))
+const topologyNetworks = computed(() => topology.value?.networks ?? [])
+const topologyIssues = computed(() => {
+  const current = topology.value
+  if (!current || current.version < 2) return [] as string[]
+  const issues: string[] = []
+  const networks = current.networks ?? []
+  const networkNames = new Set<string>()
+  for (const network of networks) {
+    if (networkNames.has(network.name)) issues.push(`Segment réseau dupliqué : ${network.name}`)
+    networkNames.add(network.name)
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(network.subnet)) issues.push(`Sous-réseau IPv4 invalide : ${network.name}`)
+  }
+  for (const node of current.nodes) {
+    const interfaces = node.interfaces ?? []
+    if (!interfaces.length) issues.push(`${node.name} doit avoir au moins une interface`)
+    const interfaceNames = new Set<string>()
+    for (const item of interfaces) {
+      if (interfaceNames.has(item.name)) issues.push(`${node.name} contient deux interfaces ${item.name}`)
+      interfaceNames.add(item.name)
+      if (!networkNames.has(item.network)) issues.push(`${node.name}.${item.name} référence le segment absent ${item.network}`)
+      if (item.ipv4 && !/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(item.ipv4)) issues.push(`Adresse IPv4 invalide sur ${node.name}.${item.name}`)
+    }
+    for (const route of node.routes ?? []) {
+      if (!/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(route.destination)) issues.push(`Destination de route invalide sur ${node.name}`)
+      if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(route.via)) issues.push(`Passerelle de route invalide sur ${node.name}`)
+    }
+  }
+  if (!current.nodes.some(node => node.name === current.connectivity_check.from)) issues.push('Le nœud source du test est introuvable')
+  if (!current.nodes.some(node => node.name === current.connectivity_check.to)) issues.push('Le nœud destination du test est introuvable')
+  return [...new Set(issues)]
+})
+const labTemplates: Array<{ id: string; label: string; description: string; topology: Topology }> = [
+  {
+    id: 'static-routing',
+    label: 'Routage statique client–routeur–serveur',
+    description: 'Deux LAN Docker, un routeur Linux et un test ping inter-réseaux.',
+    topology: {
+      version: 2, lab: 'static-routing-lab',
+      network: { name: 'lan-a', driver: 'bridge', subnet: '10.0.1.0/24' },
+      networks: [
+        { name: 'lan-a', driver: 'bridge', subnet: '10.0.1.0/24' },
+        { name: 'lan-b', driver: 'bridge', subnet: '10.0.2.0/24' },
+      ],
+      nodes: [
+        { name: 'client-ubuntu', image: 'netlab/ubuntu-lab:24.04', command: ['sleep', 'infinity'], position: { x: 50, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan-a', ipv4: '10.0.1.10/24', gateway: '10.0.1.1' }], routes: [{ destination: '10.0.2.0/24', via: '10.0.1.1' }] },
+        { name: 'router-linux', image: 'netlab/debian-router:bookworm', command: ['sleep', 'infinity'], position: { x: 300, y: 120 }, type: 'router', router: true, interfaces: [{ name: 'eth0', network: 'lan-a', ipv4: '10.0.1.1/24' }, { name: 'eth1', network: 'lan-b', ipv4: '10.0.2.1/24' }], routes: [] },
+        { name: 'server-debian', image: 'netlab/debian-lab:bookworm', command: ['sleep', 'infinity'], position: { x: 560, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan-b', ipv4: '10.0.2.10/24', gateway: '10.0.2.1' }], routes: [{ destination: '10.0.1.0/24', via: '10.0.2.1' }] },
+      ],
+      links: [{ from: 'client-ubuntu', to: 'router-linux' }, { from: 'router-linux', to: 'server-debian' }],
+      connectivity_check: { from: 'client-ubuntu', to: 'server-debian', command: ['ping', '-c', '1', '10.0.2.10'] },
+    },
+  },
+  {
+    id: 'simple-lan',
+    label: 'Réseau local Ubuntu–Debian',
+    description: 'Deux hôtes sur un même segment Docker pour les premiers exercices IP.',
+    topology: {
+      version: 2, lab: 'simple-lan-lab',
+      network: { name: 'lan', driver: 'bridge', subnet: '10.10.0.0/24' },
+      networks: [{ name: 'lan', driver: 'bridge', subnet: '10.10.0.0/24' }],
+      nodes: [
+        { name: 'client-ubuntu', image: 'netlab/ubuntu-lab:24.04', command: ['sleep', 'infinity'], position: { x: 150, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan', ipv4: '10.10.0.10/24' }], routes: [] },
+        { name: 'server-debian', image: 'netlab/debian-lab:bookworm', command: ['sleep', 'infinity'], position: { x: 470, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan', ipv4: '10.10.0.20/24' }], routes: [] },
+      ],
+      links: [{ from: 'client-ubuntu', to: 'server-debian' }],
+      connectivity_check: { from: 'client-ubuntu', to: 'server-debian', command: ['ping', '-c', '1', '10.10.0.20'] },
+    },
+  },
+]
 function nodeStatus(name: string) { return statuses.value.find(node => node.name === name)?.state ?? 'inconnu' }
 function showError(error: unknown) { pageError.value = error instanceof Error ? error.message : 'Erreur inconnue' }
 
@@ -201,12 +271,80 @@ function removeSelected() {
   topology.value.links = topology.value.links.filter(link => link.from !== selected.value && link.to !== selected.value)
   selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = true
 }
+function addNetwork() {
+  if (!topology.value || topology.value.version < 2) return
+  const name = window.prompt('Nom du segment réseau :', `lan-${(topology.value.networks?.length ?? 0) + 1}`)
+  const subnet = window.prompt('Sous-réseau IPv4 CIDR :', `10.0.${(topology.value.networks?.length ?? 0) + 1}.0/24`)
+  if (!name || !subnet) return
+  if (topology.value.networks?.some(network => network.name === name)) { pageError.value = 'Ce segment existe déjà.'; return }
+  topology.value.networks ??= []
+  topology.value.networks.push({ name, driver: 'bridge', subnet })
+  dirty.value = true
+}
+function removeNetwork(networkName: string) {
+  if (!topology.value?.networks || topology.value.networks.length <= 1) return
+  if (topology.value.nodes.some(node => node.interfaces?.some(item => item.network === networkName))) {
+    pageError.value = 'Impossible de supprimer un segment encore utilisé par une interface.'
+    return
+  }
+  topology.value.networks = topology.value.networks.filter(network => network.name !== networkName)
+  dirty.value = true
+}
+function addInterface(node: Node) {
+  if (!topology.value || topology.value.version < 2) return
+  const networks = topology.value.networks ?? []
+  const usedNetworks = new Set((node.interfaces ?? []).map(item => item.network))
+  const network = networks.find(item => !usedNetworks.has(item.name)) ?? networks[0]
+  if (!network) return
+  node.interfaces ??= []
+  const index = node.interfaces.length
+  node.interfaces.push({ name: `eth${index}`, network: network.name })
+  dirty.value = true
+}
+function removeInterface(node: Node, index: number) {
+  if (!node.interfaces || node.interfaces.length <= 1) return
+  node.interfaces.splice(index, 1)
+  dirty.value = true
+}
+function addRoute(node: Node) {
+  node.routes ??= []
+  node.routes.push({ destination: '0.0.0.0/0', via: '' })
+  dirty.value = true
+}
+function removeRoute(node: Node, index: number) {
+  if (!node.routes) return
+  node.routes.splice(index, 1)
+  dirty.value = true
+}
+function nodeCommand(node: Node) { return node.command.join(' ') }
+function setNodeCommand(node: Node, value: string) {
+  node.command = value.trim().split(/\s+/).filter(Boolean)
+  dirty.value = true
+}
+function setConnectivityCommand(command: string) {
+  if (!topology.value) return
+  topology.value.connectivity_check.command = [command]
+  dirty.value = true
+}
+function applyTemplate() {
+  const template = labTemplates.find(item => item.id === selectedTemplateId.value)
+  if (!template) return
+  if (dirty.value && !window.confirm('Remplacer la topologie actuelle et perdre les modifications non sauvegardées ?')) return
+  topology.value = structuredClone(template.topology)
+  selected.value = topology.value.nodes[0]?.name ?? null
+  dirty.value = true
+  terminalSocket.value?.close()
+  terminalOutput.value = `Modèle chargé : ${template.label}`
+  pageError.value = ''
+}
 function addNode() {
   if (!topology.value) return
   const name = window.prompt('Nom du nœud :', `linux-node-${topology.value.nodes.length + 1}`)
   const image = window.prompt('Image Docker :', 'ubuntu:24.04')
   if (!name || !image || topology.value.nodes.some(node => node.name === name)) return
-  topology.value.nodes.push({ name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 } })
+  const node: Node = { name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 } }
+  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
+  topology.value.nodes.push(node)
   selected.value = name; dirty.value = true
 }
 function addCatalogService() {
@@ -231,6 +369,7 @@ function addCatalogService() {
     name, image: profile.image, command: [...profile.command], service_id: profile.id,
     position: { x: 60 + topology.value.nodes.length * 210, y: 110 },
   }
+  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   if (publishedPort !== undefined) node.published_port = publishedPort
   topology.value.nodes.push(node); selected.value = name; dirty.value = true
 }
@@ -293,8 +432,13 @@ function collectedAtText(value: string | null) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('fr-FR')
 }
-async function action(name: 'up' | 'down' | 'verify') { try { const result = await api.action(name); terminalOutput.value = result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`; await refresh() } catch (error) { showError(error) } }
-async function save() { if (!topology.value) return; try { await api.save(topology.value); dirty.value = false; await refresh() } catch (error) { showError(error) } }
+function topologyReady() {
+  if (!topologyIssues.value.length) return true
+  pageError.value = `Topologie invalide : ${topologyIssues.value[0]}`
+  return false
+}
+async function action(name: 'up' | 'down' | 'verify') { try { if (name !== 'down' && !topologyReady()) return; const result = await api.action(name); terminalOutput.value = result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`; await refresh() } catch (error) { showError(error) } }
+async function save() { if (!topology.value || !topologyReady()) return; try { await api.save(topology.value); dirty.value = false; await refresh() } catch (error) { showError(error) } }
 async function restore() { if (!topology.value || !versions.value.length) return; const raw = window.prompt(`Version à restaurer (${versions.value.map(version => version.version).join(', ')})`, String(versions.value[0].version)); const version = Number(raw); if (!Number.isInteger(version)) return; try { const response = await api.restore(topology.value.lab, version); topology.value = response.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
 async function cloneLab() { if (!topology.value) return; const newLab = window.prompt('Nom du laboratoire cloné :', `${topology.value.lab}-copy`); if (!newLab) return; try { await api.clone(topology.value.lab, newLab); terminalOutput.value = `laboratoire cloné : ${newLab}`; await refresh(false) } catch (error) { showError(error) } }
 async function exportLab() { if (!topology.value) return; try { const payload = await api.export(topology.value.lab); const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${topology.value.lab}.netlab.json`; link.click(); URL.revokeObjectURL(link.href) } catch (error) { showError(error) } }
@@ -352,8 +496,55 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
     <main>
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <template v-if="topology">
-      <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label></section>
+      <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" @click="applyTemplate">Charger le modèle</button></section>
       <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section v-if="topology.version >= 2" class="panel topology-config">
+        <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
+        <div class="network-editor-grid">
+          <article v-for="network in topologyNetworks" :key="network.name" class="nested network-editor-card">
+            <div class="card-heading"><strong>{{ network.name }}</strong><button v-if="topologyNetworks.length > 1" class="icon-button danger" @click="removeNetwork(network.name)">Supprimer</button></div>
+            <label>Nom du segment (identifiant)<input :value="network.name" readonly /></label>
+            <label>Sous-réseau IPv4<input v-model="network.subnet" placeholder="10.0.1.0/24" @input="dirty = true" /></label>
+          </article>
+        </div>
+        <div v-if="selectedNode" class="node-config">
+          <div class="section-title"><div><h3>Nœud sélectionné : {{ selectedNode.name }}</h3><span>configuration de ses interfaces et routes</span></div><button class="secondary" @click="addInterface(selectedNode)">Ajouter une interface</button></div>
+          <div class="node-basic-fields">
+            <label>Image Docker<input v-model="selectedNode.image" :readonly="Boolean(selectedNode.service_id)" @input="dirty = true" /></label>
+            <label v-if="!selectedNode.service_id">Commande de démarrage<input :value="nodeCommand(selectedNode)" placeholder="sleep infinity" @input="setNodeCommand(selectedNode, ($event.target as HTMLInputElement).value)" /></label>
+            <p v-else class="hint">Le profil catalogue contrôle l’image et la commande de ce nœud.</p>
+          </div>
+          <label class="router-toggle"><input v-model="selectedNode.router" type="checkbox" @change="selectedNode.type = selectedNode.router ? 'router' : 'linux'; dirty = true" /> Activer le forwarding IPv4 et les capacités routeur</label>
+          <div class="interface-list">
+            <div v-for="(interfaceItem, index) in selectedNode.interfaces" :key="`${selectedNode.name}-${index}`" class="interface-row">
+              <input v-model="interfaceItem.name" aria-label="Nom de l’interface" placeholder="eth0" @input="dirty = true" />
+              <select v-model="interfaceItem.network" aria-label="Segment de l’interface" @change="dirty = true"><option v-for="network in topologyNetworks" :key="network.name" :value="network.name">{{ network.name }}</option></select>
+              <input v-model="interfaceItem.ipv4" aria-label="Adresse IPv4" placeholder="10.0.1.10/24" @input="dirty = true" />
+              <input v-model="interfaceItem.gateway" aria-label="Passerelle" placeholder="Passerelle facultative" @input="dirty = true" />
+              <button class="icon-button danger" :disabled="(selectedNode.interfaces?.length ?? 0) <= 1" @click="removeInterface(selectedNode, index)">×</button>
+            </div>
+          </div>
+          <div class="section-title routes-heading"><div><h3>Routes statiques</h3><span>appliquées au déploiement Docker</span></div><button class="secondary" @click="addRoute(selectedNode)">Ajouter une route</button></div>
+          <div class="route-list">
+            <div v-for="(route, index) in selectedNode.routes" :key="`${selectedNode.name}-route-${index}`" class="interface-row">
+              <input v-model="route.destination" aria-label="Destination de la route" placeholder="0.0.0.0/0" @input="dirty = true" />
+              <input v-model="route.via" aria-label="Passerelle de la route" placeholder="10.0.1.1" @input="dirty = true" />
+              <button class="icon-button danger" @click="removeRoute(selectedNode, index)">×</button>
+            </div>
+          </div>
+        </div>
+        <p v-else class="hint">Sélectionnez un nœud dans le graphe pour modifier ses interfaces et ses routes.</p>
+      </section>
+      <section v-if="topology.version >= 2" class="panel connectivity-config">
+        <div class="section-title"><div><h2>Test de connectivité</h2><span>commande contrôlée exécutée depuis le nœud source</span></div></div>
+        <div class="connectivity-fields">
+          <label>Nœud source<select v-model="topology.connectivity_check.from" @change="dirty = true"><option v-for="node in topology.nodes" :key="`from-${node.name}`" :value="node.name">{{ node.name }}</option></select></label>
+          <label>Nœud destination<select v-model="topology.connectivity_check.to" @change="dirty = true"><option v-for="node in topology.nodes" :key="`to-${node.name}`" :value="node.name">{{ node.name }}</option></select></label>
+          <label>Vérification<select :value="topology.connectivity_check.command[0] ?? 'ping'" @change="setConnectivityCommand(($event.target as HTMLSelectElement).value)"><option value="ping">ping</option><option value="getent">getent hosts</option><option value="ip">ip route</option></select></label>
+        </div>
+        <div v-if="topologyIssues.length" class="validation-box error"><strong>{{ topologyIssues.length }} problème(s) à corriger avant sauvegarde ou déploiement</strong><ul><li v-for="issue in topologyIssues" :key="issue">{{ issue }}</li></ul></div>
+        <div v-else class="validation-box success">Topologie v2 cohérente localement. La validation serveur vérifiera aussi les CIDR, chevauchements de sous-réseaux et adresses IPv4.</div>
+      </section>
       <section class="panel catalog-panel"><div class="section-title"><div><h2>Catalogue de services</h2><span>{{ deployableServices.length }} profils déployables localement · {{ serviceCatalog.length }} documentés</span></div></div><div class="catalog-grid"><article v-for="profile in serviceCatalog" :key="profile.id" class="catalog-card"><div class="catalog-card-head"><h3>{{ profile.label }}</h3><span class="catalog-status" :class="profile.status">{{ profile.status === 'ready' ? 'disponible' : profile.status === 'planned' ? 'prévu' : 'étude' }}</span></div><code>{{ profile.image ?? 'image VM à définir' }}</code><p><strong>Ports :</strong> {{ portsText(profile) }}</p><p><strong>Ressources :</strong> {{ resourceText(profile) }}</p><p v-if="profile.environment.length"><strong>Variables :</strong> {{ profile.environment.map(item => `${item.name}${item.secret ? ' (secret)' : ''}`).join(', ') }}</p><ul><li v-for="constraint in profile.constraints" :key="constraint">{{ constraint }}</li></ul></article></div></section>
       <section class="panel education-panel">
         <div class="section-title"><div><h2>Partage pédagogique</h2><span>Comptes, groupes, affectations et remises</span></div><button class="secondary" @click="loadEducation">Actualiser</button></div>
