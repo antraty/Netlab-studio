@@ -1,6 +1,9 @@
 import copy
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.app.services import list_services
 from netlab import (
@@ -9,7 +12,10 @@ from netlab import (
     docker_run_args,
     load_topology,
     runtime_config_path,
+    runtime_env_path,
+    service_start_order,
     validate_topology,
+    _write_runtime_env,
 )
 
 
@@ -32,7 +38,7 @@ class ServiceCatalogTests(unittest.TestCase):
     def test_catalog_marks_only_the_initial_web_profiles_deployable(self):
         services = list_services()
         deployable = {service["id"] for service in services if service["deployable"]}
-        self.assertEqual(deployable, {"nginx", "apache", "coredns"})
+        self.assertEqual(deployable, {"nginx", "apache", "coredns", "postgresql", "mysql", "mongodb"})
         self.assertIn("POSTGRES_PASSWORD", {item["name"] for service in services for item in service["environment"]})
 
     def test_nginx_run_args_have_resource_limits_and_loopback_publish(self):
@@ -49,6 +55,42 @@ class ServiceCatalogTests(unittest.TestCase):
         self.assertIn("io.netlab.studio.pids=128", args)
         self.assertIn("127.0.0.1:8088:80/tcp", args)
         self.assertNotIn("0.0.0.0:8088:80/tcp", args)
+
+    def test_postgresql_uses_secret_reference_volume_and_healthcheck(self):
+        topology = copy.deepcopy(self.base_topology)
+        node = topology["nodes"][0]
+        node.update({
+            "service_id": "postgresql",
+            "image": "postgres:17-alpine",
+            "command": ["postgres"],
+            "environment": {"POSTGRES_USER": "lab", "POSTGRES_DB": "training"},
+            "secret_refs": {"POSTGRES_PASSWORD": "lab-password"},
+            "depends_on": [],
+        })
+        node.pop("published_port", None)
+        validate_topology(topology)
+        args = docker_run_args(topology, node, "lan-a-runtime", node["interfaces"][0])
+        self.assertIn("--env-file", args)
+        self.assertIn("target=/var/lib/postgresql/data", " ".join(args))
+        self.assertIn("--health-cmd", args)
+        self.assertIn("pg_isready", " ".join(args))
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"NETLAB_SECRET_LAB_PASSWORD": "not-in-topology"}):
+            with patch.dict(os.environ, {"NETLAB_DATA_DIR": directory}):
+                _write_runtime_env(topology, node)
+                env_path = runtime_env_path(topology, node)
+                self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+                contents = env_path.read_text()
+                self.assertIn("POSTGRES_USER=lab", contents)
+                self.assertIn("POSTGRES_PASSWORD=not-in-topology", contents)
+                self.assertNotIn("lab-password", contents)
+
+    def test_service_dependencies_are_ordered_and_cycles_rejected(self):
+        topology = copy.deepcopy(self.base_topology)
+        topology["nodes"][1]["depends_on"] = [topology["nodes"][0]["name"]]
+        self.assertEqual([node["name"] for node in service_start_order(topology)], ["client-ubuntu", "router-linux", "server-debian"])
+        topology["nodes"][0]["depends_on"] = [topology["nodes"][1]["name"]]
+        with self.assertRaisesRegex(TopologyError, "cycle"):
+            validate_topology(topology)
 
     def test_router_run_args_enable_forwarding(self):
         node = self.base_topology["nodes"][1]

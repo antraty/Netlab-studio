@@ -278,7 +278,15 @@ npm install
 npm run dev
 ```
 
-Ouvrir ensuite `http://127.0.0.1:5173`. La page de configuration demande le jeton et crée le premier enseignant ; l’application ne propose pas d’inscription publique. Conserver ce jeton hors du dépôt et de l’historique shell, puis le supprimer de l’environnement après la création du compte. Les comptes étudiants sont créés par un enseignant avec un mot de passe initial, à transmettre séparément. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
+Ouvrir ensuite `http://127.0.0.1:5173`. La page de configuration demande le jeton et crée le premier enseignant ; l’application ne propose pas d’inscription publique. Conserver ce jeton hors du dépôt et de l’historique shell, puis le supprimer de l’environnement après la création du compte. Une fois connecté, un enseignant peut créer d’autres comptes enseignants et étudiants depuis **Partage pédagogique**. Pour partager un laboratoire avec un autre enseignant, utilisez **Partager** et choisissez `editor` ou `viewer` ; les comptes enseignants peuvent aussi créer leurs propres laboratoires et groupes.
+
+Si le premier compte ou ses identifiants sont perdus, ne supprimez pas la base et ne réinitialisez pas tout le projet. Depuis la machine qui héberge les données, arrêtez l’API et sauvegardez la base (copie du fichier SQLite ou sauvegarde PostgreSQL). Configurez le même `NETLAB_DATA_DIR` / `NETLAB_EDUCATION_DB` (ou `NETLAB_DATABASE_URL`) que le service puis créez un nouveau compte enseignant local :
+
+```bash
+.venv/bin/python -m backend.app.admin create-teacher
+```
+
+La commande demande un nouveau courriel, nom et mot de passe (sans afficher celui-ci), puis exige la confirmation `CREER` ; elle ajoute un compte et conserve les données existantes. Pour PostgreSQL, exportez `NETLAB_DATABASE_URL` avant de lancer la commande. Après cela, reconnectez-vous avec les nouveaux identifiants. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
 
 La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket et la persistance versionnée locale sont disponibles en prototype. L’étape 6 ajoute la séparation entre le plan de contrôle et le worker Docker : lorsque `NETLAB_WORKER_URL` est défini, FastAPI envoie des jobs HTTP authentifiés au worker au lieu d’accéder au moteur Docker localement. Les fichiers `.netlab-data/` décrivent la définition souhaitée des laboratoires ; l’état temporaire des conteneurs reste géré par le worker.
 
@@ -585,3 +593,20 @@ Puis ouvrir `http://127.0.0.1:5173` pour piloter le laboratoire, consulter les �
 L’étape 4 ajoute une session terminal WebSocket par nœud via `ws://.../ws/nodes/<nom>/terminal`. Elle ouvre un shell dans le conteneur et transfère les entrées/sorties en continu. Les connexions WebSocket contrôlent l’origine et l’identité ; en production, une origine HTTPS autorisée est obligatoire.
 
 L’éditeur visuel est disponible : les nœuds peuvent être déplacés, ajoutés, supprimés ou reliés, puis sauvegardés dans la topologie JSON. Pour les topologies v2, les panneaux de configuration permettent d’ajouter ou supprimer des segments, de modifier leurs sous-réseaux, de gérer les interfaces et les routes du nœud sélectionné, puis d’activer son rôle de routeur. Deux modèles prêts à l’emploi sont proposés : un réseau local Ubuntu–Debian et un scénario de routage statique client–routeur–serveur. Le test de connectivité peut sélectionner ses nœuds et une commande contrôlée. Une validation locale signale les références, adresses et routes incohérentes et bloque la sauvegarde, le déploiement ou la vérification tant que le problème n’est pas corrigé ; le backend revalide toujours la topologie.
+
+
+## Démarrage reproductible avec Docker Compose
+
+La Tranche 1 fournit un profil Docker Compose pour lancer le frontend, l’API FastAPI, le worker Docker et PostgreSQL :
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+Consulter [`DEPLOYMENT.md`](DEPLOYMENT.md) pour les prérequis, la construction des images de laboratoire, le flux réseau, le bootstrap du premier enseignant et les précautions avant une exposition publique. Le profil local expose uniquement `http://localhost:8080`; le socket Docker reste monté uniquement dans le worker.
+
+
+### Phase 2 — services de données
+
+La Tranche 2 rend PostgreSQL, MySQL et MongoDB disponibles comme profils de laboratoire. Chaque profil impose son image et sa commande catalogue, ses limites CPU/mémoire/PID, un volume Docker persistant et un healthcheck. Les variables non secrètes sont stockées dans la topologie ; les mots de passe utilisent `secret_refs` et des variables `NETLAB_SECRET_*` présentes uniquement dans l’environnement du worker. Les nœuds peuvent aussi déclarer `depends_on` ; l’orchestrateur refuse les cycles et démarre les dépendances en premier.

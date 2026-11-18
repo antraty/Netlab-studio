@@ -1632,6 +1632,14 @@ def create_student(request: CreateStudentRequest, teacher: dict[str, str] = Depe
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/education/teachers", status_code=201)
+def create_teacher(request: CreateStudentRequest, teacher: dict[str, str] = Depends(require_teacher)) -> dict[str, Any]:
+    try:
+        return {"user": store.create_user(request.email, request.display_name, request.password, "teacher")}
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/education/groups")
 def list_groups(user: dict[str, str] = Depends(require_user)) -> dict[str, Any]:
     return {"groups": store.list_groups(user)}

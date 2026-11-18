@@ -82,6 +82,39 @@ def _validate_node_common(node: dict[str, Any], names: set[str], host_ports: set
     command = node.get("command", DEFAULT_COMMAND)
     if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
         raise TopologyError(f"node {node['name']} command must be a non-empty string list")
+    environment = node.get("environment", {})
+    secret_refs = node.get("secret_refs", {})
+    for field, values in (("environment", environment), ("secret_refs", secret_refs)):
+        if not isinstance(values, dict):
+            raise TopologyError(f"node {node['name']} {field} must be an object")
+        for key, value in values.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key):
+                raise TopologyError(f"node {node['name']} {field} keys must be uppercase identifiers")
+            if not isinstance(value, str) or len(value) > 4096:
+                raise TopologyError(f"node {node['name']} {field} values are invalid or too long")
+            if field == "secret_refs" and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}", value):
+                raise TopologyError(f"node {node['name']} secret references must be safe identifiers")
+    overlap = set(environment) & set(secret_refs)
+    if overlap:
+        raise TopologyError(f"node {node['name']} cannot define both environment and secret_refs for: {', '.join(sorted(overlap))}")
+    depends_on = node.get("depends_on", [])
+    if not isinstance(depends_on, list) or len(depends_on) > 32 or any(not isinstance(item, str) for item in depends_on):
+        raise TopologyError(f"node {node['name']} depends_on must be a list of node names")
+    if len(depends_on) != len(set(depends_on)):
+        raise TopologyError(f"node {node['name']} depends_on must not contain duplicates")
+    for dependency in depends_on:
+        validate_identifier(dependency, f"node {node['name']}.depends_on")
+    profile = get_service(node.get("service_id", ""))
+    if profile:
+        allowed_environment = {item.name: item for item in profile.environment}
+        unknown = (set(environment) | set(secret_refs)) - set(allowed_environment)
+        if unknown:
+            raise TopologyError(f"node {node['name']} uses unsupported service variables: {', '.join(sorted(unknown))}")
+        for requirement in profile.environment:
+            if requirement.required and requirement.name not in environment and requirement.name not in secret_refs:
+                raise TopologyError(f"node {node['name']} requires service variable {requirement.name}")
+            if requirement.name in secret_refs and not requirement.secret:
+                raise TopologyError(f"node {node['name']} variable {requirement.name} must not be stored as a secret reference")
     service_id = node.get("service_id")
     published_port = node.get("published_port")
     if service_id is not None and (not isinstance(service_id, str) or not service_id.strip()):
@@ -89,7 +122,7 @@ def _validate_node_common(node: dict[str, Any], names: set[str], host_ports: set
     if published_port is not None and (not isinstance(published_port, int) or isinstance(published_port, bool) or not 1 <= published_port <= 65535):
         raise TopologyError(f"node {node['name']} published_port must be between 1 and 65535")
     try:
-        validate_catalog_node(service_id, node["image"], command, published_port)
+        validate_catalog_node(service_id, node["image"], command, published_port, environment, secret_refs)
     except ValueError as exc:
         raise TopologyError(str(exc)) from exc
     if published_port is not None:
@@ -222,6 +255,13 @@ def validate_topology(topology: dict[str, Any]) -> None:
                     raise TopologyError(f"CoreDNS record {hostname} must use an address in a laboratory subnet")
         elif records:
             raise TopologyError(f"DNS records are only supported on CoreDNS nodes")
+    for node in nodes:
+        for dependency in node.get("depends_on", []):
+            if dependency not in names:
+                raise TopologyError(f"node {node['name']} depends on unknown node {dependency}")
+            if dependency == node["name"]:
+                raise TopologyError(f"node {node['name']} cannot depend on itself")
+    service_start_order(topology)
 
     links = topology.get("links", [])
     if not isinstance(links, list):
@@ -301,6 +341,67 @@ def runtime_config_path(topology: dict[str, Any], node: dict[str, Any]) -> Path:
     return runtime_config_dir(topology) / f"{node_digest}.Corefile"
 
 
+def runtime_env_path(topology: dict[str, Any], node: dict[str, Any]) -> Path:
+    node_digest = hashlib.sha256(node["name"].encode()).hexdigest()[:16]
+    return runtime_config_dir(topology) / f"{node_digest}.env"
+
+
+def runtime_volume_name(topology: dict[str, Any], node: dict[str, Any], target: str) -> str:
+    target_digest = hashlib.sha256(target.encode()).hexdigest()[:10]
+    return f"{resource_name(topology, node['name'])}-{target_digest}-data"
+
+
+def _secret_environment_name(reference: str) -> str:
+    return "NETLAB_SECRET_" + reference.upper().replace("-", "_").replace(".", "_")
+
+
+def _write_runtime_env(topology: dict[str, Any], node: dict[str, Any]) -> None:
+    environment = dict(node.get("environment", {}))
+    for key, reference in node.get("secret_refs", {}).items():
+        source_name = _secret_environment_name(reference)
+        value = os.getenv(source_name)
+        if value is None:
+            raise TopologyError(f"missing secret environment variable {source_name} for node {node['name']}")
+        environment[key] = value
+    if not environment:
+        return
+    path = runtime_env_path(topology, node)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text("".join(f"{key}={value}\n" for key, value in sorted(environment.items())), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _write_runtime_envs(topology: dict[str, Any]) -> None:
+    for node in topology["nodes"]:
+        _write_runtime_env(topology, node)
+
+
+def service_start_order(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return nodes in dependency order and reject dependency cycles."""
+    by_name = {node["name"]: node for node in topology["nodes"]}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            raise TopologyError(f"service dependency cycle includes {name}")
+        if name in visited:
+            return
+        visiting.add(name)
+        for dependency in by_name[name].get("depends_on", []):
+            if dependency not in by_name:
+                raise TopologyError(f"node {name} depends on unknown node {dependency}")
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(by_name[name])
+
+    for node in topology["nodes"]:
+        visit(node["name"])
+    return ordered
+
+
 def _write_runtime_configs(topology: dict[str, Any]) -> None:
     for node in topology["nodes"]:
         if node.get("service_id") != "coredns":
@@ -370,8 +471,22 @@ def docker_run_args(topology: dict[str, Any], node: dict[str, Any], network_name
             "--mount",
             f"type=bind,source={runtime_config_path(topology, node)},target=/etc/coredns/Corefile,readonly",
         ]
+    if node.get("environment") or node.get("secret_refs"):
+        args += ["--env-file", str(runtime_env_path(topology, node))]
     if profile:
         args += ["--label", "io.netlab.studio.service=" + profile.id]
+        for volume in profile.volumes:
+            mount = f"type=volume,source={runtime_volume_name(topology, node, volume.target)},target={volume.target}"
+            if volume.read_only:
+                mount += ",readonly"
+            args += ["--mount", mount]
+        if profile.healthcheck:
+            args += [
+                "--health-cmd", profile.healthcheck,
+                "--health-interval", "10s",
+                "--health-timeout", "5s",
+                "--health-retries", "12",
+            ]
         if node.get("published_port") is not None:
             args += ["--publish", f"127.0.0.1:{node['published_port']}:{profile.primary_port}/tcp"]
     args += [node["image"], *node.get("command", DEFAULT_COMMAND)]
@@ -404,6 +519,7 @@ def deploy(topology: dict[str, Any]) -> int:
     containers: list[str] = []
     try:
         _write_runtime_configs(topology)
+        _write_runtime_envs(topology)
         for network, runtime_name in zip(specs, runtime_networks):
             inspected = docker("network", "inspect", runtime_name, capture=True)
             if inspected.returncode != 0:
@@ -418,7 +534,7 @@ def deploy(topology: dict[str, Any]) -> int:
                     return result.returncode
                 created_networks.append(runtime_name)
                 print(f"created network {runtime_name}")
-        for node in topology["nodes"]:
+        for node in service_start_order(topology):
             container = resource_name(topology, node["name"])
             docker("rm", "-f", container, capture=True)
             interfaces = node_interfaces(topology, node)

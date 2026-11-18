@@ -1,5 +1,9 @@
 # Migration — FastAPI + Vue
 
+- [x] Ajouter un profil Docker Compose reproductible avec PostgreSQL, control plane, worker Docker et frontend Nginx.
+- [x] Ne monter le socket Docker que dans le worker et proxyfier l’API/ WebSocket depuis le frontend.
+- [x] Ajouter les Dockerfiles, healthchecks, commandes Makefile et guide de déploiement de la stack.
+- [x] Ajouter des contrats statiques de déploiement et vérifier les tests Python ainsi que le build Vue.
 - [x] Exposer la topologie, les états, les logs et les actions via FastAPI.
 - [x] Valider les topologies avec des modèles Pydantic.
 - [x] Conserver l’orchestrateur indépendant du transport HTTP.
@@ -48,6 +52,6 @@
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
 - [x] Ajouter CoreDNS avec des enregistrements A validés dans les sous-réseaux du laboratoire, une configuration générée et montée en lecture seule.
 - [ ] Ajouter DHCP/dnsmasq avec segments dédiés, configuration contrôlée et droits réseau minimaux.
-- [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
+- [x] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
 - [ ] Ajouter WordPress, Jenkins, GitLab et Laravel avec dépendances, limites de ressources, volumes et images épinglées.
 - [ ] Évaluer pfSense, MikroTik CHR et Windows Server/Active Directory sur un moteur VM/KVM avec validation de licences.

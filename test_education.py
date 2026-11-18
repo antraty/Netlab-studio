@@ -1,4 +1,6 @@
 from copy import deepcopy
+from contextlib import redirect_stdout
+import io
 import os
 import tempfile
 import unittest
@@ -10,6 +12,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.app import education
+from backend.app import admin
 from backend.app.education import DatabaseConnection, EducationStore
 from backend.app.storage import TopologyStore
 from netlab import load_topology
@@ -290,7 +293,7 @@ class EducationApiTests(unittest.TestCase):
         })
         response = self.client.get("/api/services")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache", "coredns"})
+        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache", "coredns", "postgresql", "mysql", "mongodb"})
         laboratory = self.client.get("/api/laboratories").json()["laboratories"][0]
         from backend.app.main import control
         sample = {
@@ -330,6 +333,79 @@ class EducationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["errors"], [])
         response = self.client.post("/api/education/groups", json={"name": "No CSRF"})
         self.assertEqual(response.status_code, 403)
+
+    def test_multiple_teacher_accounts_are_created_by_authenticated_teacher(self):
+        created = self.client.post("/api/auth/bootstrap", json={
+            "bootstrap_token": "test-setup-secret", "email": "owner@example.test",
+            "display_name": "Owner", "password": "owner-password-123",
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        payload = {
+            "email": "colleague@example.test",
+            "display_name": "Colleague",
+            "password": "colleague-password-123",
+        }
+        guest = TestClient(self.client.app)
+        self.assertEqual(guest.post("/api/education/teachers", json=payload).status_code, 401)
+        guest.close()
+        created_teacher = self.client.post(
+            "/api/education/teachers",
+            headers=self.csrf_headers(self.client),
+            json=payload,
+        )
+        self.assertEqual(created_teacher.status_code, 201, created_teacher.text)
+        self.assertEqual(created_teacher.json()["user"]["role"], "teacher")
+        student_payload = {
+            "email": "student@example.test",
+            "display_name": "Student",
+            "password": "student-password-123",
+        }
+        student_created = self.client.post(
+            "/api/education/users",
+            headers=self.csrf_headers(self.client),
+            json=student_payload,
+        )
+        self.assertEqual(student_created.status_code, 201, student_created.text)
+        colleague = TestClient(self.client.app)
+        login = colleague.post(
+            "/api/auth/login",
+            json={"email": payload["email"], "password": payload["password"]},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertEqual(colleague.get("/api/auth/me").json()["user"]["role"], "teacher")
+        colleague.close()
+        student = TestClient(self.client.app)
+        student_login = student.post(
+            "/api/auth/login",
+            json={"email": student_payload["email"], "password": student_payload["password"]},
+        )
+        self.assertEqual(student_login.status_code, 200, student_login.text)
+        self.assertEqual(
+            student.post(
+                "/api/education/teachers",
+                headers=self.csrf_headers(student),
+                json={**payload, "email": "unauthorized@example.test"},
+            ).status_code,
+            403,
+        )
+        student.close()
+
+    def test_local_admin_creates_teacher_only_after_confirmation(self):
+        local_store = EducationStore(Path(self.tempdir.name) / "admin.sqlite3")
+        output = io.StringIO()
+        with (
+            patch.object(admin, "store", local_store),
+            patch("builtins.input", side_effect=[
+                "recovery@example.test", "Recovery Teacher", "CREER",
+            ]),
+            patch("backend.app.admin.getpass.getpass", side_effect=[
+                "recovery-password-123", "recovery-password-123",
+            ]),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(admin.create_teacher(), 0)
+        self.assertEqual(local_store.user_count(), 1)
+        self.assertNotIn("recovery-password-123", output.getvalue())
 
     def test_login_attempts_are_throttled(self):
         from backend.app.education import login_throttle

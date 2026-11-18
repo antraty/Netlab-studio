@@ -102,7 +102,14 @@ def validate_worker_settings() -> None:
     host = os.getenv("NETLAB_WORKER_HOST", "")
     try:
         address = ipaddress.ip_address(host)
-        if address.is_unspecified or not (address.is_loopback or address.is_private):
+        # A containerized worker must bind 0.0.0.0 to be reachable by the
+        # control plane on the private Compose network. It is not published
+        # to the host; the explicit flag prevents silently allowing this in a
+        # normal host deployment.
+        container_bind = os.getenv("NETLAB_WORKER_CONTAINER", "").strip().lower() in {"1", "true", "yes"}
+        if (address.is_unspecified and not container_bind) or not (
+            address.is_unspecified or address.is_loopback or address.is_private
+        ):
             errors.append("NETLAB_WORKER_HOST must be a loopback or private IP address")
     except ValueError:
         if host.lower() != "localhost":

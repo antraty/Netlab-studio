@@ -9,3 +9,7 @@ docker build -t netlab/debian-router:bookworm images/debian-router
 ```
 
 Ces images sont adaptées au développement local. Avant un usage partagé, épingler les images de base par digest, scanner les images et ajouter un utilisateur non privilégié lorsque les opérations réseau le permettent.
+
+## Utilisation avec Docker Compose
+
+Construire ces trois images avant `docker compose up --build -d`. Le worker les utilise pour déployer `topology.json` et les modèles intégrés à l’interface.
