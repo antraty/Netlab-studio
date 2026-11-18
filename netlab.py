@@ -8,9 +8,12 @@ network segments, node interfaces, IPv4 addresses and static routes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -187,6 +190,38 @@ def validate_topology(topology: dict[str, Any]) -> None:
         _validate_node_common(node, names, host_ports)
         if version == 2:
             _validate_v2_node(node, network_names)
+        records = node.get("dns_records", [])
+        if node.get("service_id") == "coredns":
+            if not isinstance(records, list) or not records or len(records) > 100:
+                raise TopologyError(f"CoreDNS node {node['name']} requires 1 to 100 DNS A records")
+            record_names: set[str] = set()
+            for record in records:
+                if not isinstance(record, dict):
+                    raise TopologyError(f"CoreDNS node {node['name']} DNS records must be objects")
+                hostname = record.get("name")
+                if not isinstance(hostname, str) or len(hostname) > 253:
+                    raise TopologyError(f"CoreDNS node {node['name']} has an invalid DNS name")
+                labels = hostname.rstrip(".").lower().split(".")
+                if not labels or any(
+                    not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in labels
+                ):
+                    raise TopologyError(f"CoreDNS node {node['name']} has an invalid DNS name: {hostname}")
+                normalized_name = ".".join(labels)
+                if normalized_name in record_names:
+                    raise TopologyError(f"CoreDNS node {node['name']} has duplicate DNS name: {hostname}")
+                record_names.add(normalized_name)
+                address_value = record.get("ipv4")
+                if not isinstance(address_value, str):
+                    raise TopologyError(f"CoreDNS record {hostname} must use an IPv4 address")
+                try:
+                    address = ipaddress.IPv4Address(address_value)
+                except ipaddress.AddressValueError as exc:
+                    raise TopologyError(f"CoreDNS record {hostname} must use an IPv4 address") from exc
+                if not any(address in ipaddress.ip_network(network["subnet"]) for network in networks):
+                    raise TopologyError(f"CoreDNS record {hostname} must use an address in a laboratory subnet")
+        elif records:
+            raise TopologyError(f"DNS records are only supported on CoreDNS nodes")
 
     links = topology.get("links", [])
     if not isinstance(links, list):
@@ -228,8 +263,74 @@ def network_specs(topology: dict[str, Any]) -> list[dict[str, Any]]:
     return networks if networks else [topology["network"]]
 
 
+def network_gateway(topology: dict[str, Any], network: dict[str, Any]) -> str:
+    subnet = ipaddress.ip_network(network["subnet"])
+    occupied = {
+        ipaddress.ip_interface(interface["ipv4"]).ip
+        for node in topology["nodes"]
+        for interface in node.get("interfaces", [])
+        if interface.get("network") == network["name"] and interface.get("ipv4")
+    }
+    default_gateway = ipaddress.IPv4Address(int(subnet.network_address) + 1)
+    if subnet.prefixlen < 31 and default_gateway not in occupied:
+        return str(default_gateway)
+    candidate = int(subnet.broadcast_address) - 1
+    while candidate > int(subnet.network_address):
+        address = ipaddress.IPv4Address(candidate)
+        if address not in occupied:
+            return str(address)
+        candidate -= 1
+    raise TopologyError(f"network {network['name']} has no free address for its Docker gateway")
+
+
 def runtime_network_name(topology: dict[str, Any], network: dict[str, Any]) -> str:
     return f"{resource_name(topology)}-{network['name']}"
+
+
+def runtime_config_dir(topology: dict[str, Any]) -> Path:
+    data_dir = Path(os.getenv("NETLAB_DATA_DIR", Path(__file__).resolve().parent / ".netlab-data"))
+    identity = topology.get("laboratory_id", topology["lab"])
+    digest = hashlib.sha256(str(identity).encode()).hexdigest()[:32]
+    return data_dir / "runtime-config" / digest
+
+
+def runtime_config_path(topology: dict[str, Any], node: dict[str, Any]) -> Path:
+    node_digest = hashlib.sha256(node["name"].encode()).hexdigest()[:16]
+    return runtime_config_dir(topology) / f"{node_digest}.Corefile"
+
+
+def _write_runtime_configs(topology: dict[str, Any]) -> None:
+    for node in topology["nodes"]:
+        if node.get("service_id") != "coredns":
+            continue
+        path = runtime_config_path(topology, node)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        records = [
+            f"        {record['ipv4']} {record['name'].rstrip('.').lower()}"
+            for record in node["dns_records"]
+        ]
+        corefile = "\n".join([
+            ".:53 {",
+            "    errors",
+            "    health",
+            "    ready",
+            "    hosts {",
+            *records,
+            "        fallthrough",
+            "    }",
+            "    cache 30",
+            "    forward . /etc/resolv.conf",
+            "}",
+            "",
+        ])
+        path.write_text(corefile, encoding="utf-8")
+        path.chmod(0o644)
+
+
+def _remove_runtime_configs(topology: dict[str, Any]) -> None:
+    config_dir = runtime_config_dir(topology)
+    if config_dir.is_dir():
+        shutil.rmtree(config_dir)
 
 
 def node_interfaces(topology: dict[str, Any], node: dict[str, Any]) -> list[dict[str, Any]]:
@@ -259,6 +360,13 @@ def docker_run_args(topology: dict[str, Any], node: dict[str, Any], network_name
         args += ["--ip", str(ipaddress.ip_interface(interface["ipv4"]).ip)]
     if node.get("type") == "router" or node.get("router") is True:
         args += ["--cap-add", "NET_ADMIN", "--sysctl", "net.ipv4.ip_forward=1"]
+    elif node.get("routes"):
+        args += ["--cap-add", "NET_ADMIN"]
+    if node.get("service_id") == "coredns":
+        args += [
+            "--mount",
+            f"type=bind,source={runtime_config_path(topology, node)},target=/etc/coredns/Corefile,readonly",
+        ]
     if profile:
         args += ["--label", "io.netlab.studio.service=" + profile.id]
         if node.get("published_port") is not None:
@@ -272,6 +380,7 @@ def _cleanup(topology: dict[str, Any], containers: list[str], networks: list[str
         docker("rm", "-f", container, capture=True)
     for network in networks:
         docker("network", "rm", network, capture=True)
+    _remove_runtime_configs(topology)
 
 
 def _exec_retry(container: str, command: list[str], attempts: int = 20) -> subprocess.CompletedProcess[str]:
@@ -291,13 +400,14 @@ def deploy(topology: dict[str, Any]) -> int:
     created_networks: list[str] = []
     containers: list[str] = []
     try:
+        _write_runtime_configs(topology)
         for network, runtime_name in zip(specs, runtime_networks):
             inspected = docker("network", "inspect", runtime_name, capture=True)
             if inspected.returncode != 0:
                 args = ["network", "create", "--driver", network["driver"], "--label", f"io.netlab.studio.lab={topology['lab']}"]
                 if topology.get("laboratory_id"):
                     args += ["--label", f"io.netlab.studio.laboratory_id={topology['laboratory_id']}"]
-                args += ["--subnet", network["subnet"], runtime_name]
+                args += ["--subnet", network["subnet"], "--gateway", network_gateway(topology, network), runtime_name]
                 result = docker(*args, capture=True)
                 if result.returncode:
                     print(result.stderr.strip(), file=sys.stderr)
@@ -313,6 +423,7 @@ def deploy(topology: dict[str, Any]) -> int:
             result = docker(*docker_run_args(topology, node, runtime_network_name(topology, first_network), interfaces[0]), capture=True)
             if result.returncode:
                 print(f"failed to start {node['name']}: {result.stderr.strip()}", file=sys.stderr)
+                docker("rm", "-f", container, capture=True)
                 _cleanup(topology, containers, created_networks)
                 return result.returncode
             containers.append(container)
@@ -337,6 +448,10 @@ def deploy(topology: dict[str, Any]) -> int:
         return 0
     except (StopIteration, KeyError, ValueError) as exc:
         print(f"deployment plan error: {exc}", file=sys.stderr)
+        _cleanup(topology, containers, created_networks)
+        return 2
+    except OSError as exc:
+        print(f"could not prepare service configuration: {exc}", file=sys.stderr)
         _cleanup(topology, containers, created_networks)
         return 2
 
@@ -368,6 +483,7 @@ def destroy(topology: dict[str, Any]) -> int:
         result = docker("network", "rm", runtime_name, capture=True)
         if result.returncode == 0:
             print(f"removed network {runtime_name}")
+    _remove_runtime_configs(topology)
     return 0
 
 

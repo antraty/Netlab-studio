@@ -14,7 +14,9 @@ _TABLES = (
     "group_members",
     "assignments",
     "student_labs",
+    "student_lab_runtime",
     "laboratories",
+    "laboratory_versions",
     "laboratory_members",
     "laboratory_events",
 )
@@ -49,6 +51,11 @@ def migrate(source_path: Path, target_url: str) -> int:
                 for row in rows:
                     destination.execute(statement, tuple(row))
                     copied += 1
+            destination.execute(
+                "INSERT INTO laboratory_versions(laboratory_id,version,created_at,reason,topology_json) "
+                "SELECT l.id,1,l.created_at,'migrated-current',l.topology_json FROM laboratories l "
+                "WHERE NOT EXISTS (SELECT 1 FROM laboratory_versions v WHERE v.laboratory_id=l.id)"
+            )
         return copied
     finally:
         source.close()
@@ -67,7 +74,7 @@ def main() -> None:
     if not target_url:
         parser.error("set NETLAB_DATABASE_URL to the PostgreSQL target before running")
     copied = migrate(arguments.source, target_url)
-    print(f"Copied {copied} records. SQLite topology-version files were not moved.")
+    print(f"Copied {copied} records, including database-backed topology versions.")
 
 
 if __name__ == "__main__":

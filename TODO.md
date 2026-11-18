@@ -25,12 +25,14 @@
 - [ ] Ajouter rôles administrateur/enseignant/étudiant plus granulaires, groupes de travail et permissions par laboratoire.
 - [x] Ajouter les identifiants UUID de laboratoire, rôles `owner`/`editor`/`viewer`, API d’exécution isolée par ID et sélection de plusieurs laboratoires.
 - [ ] Construire l’édition visuelle des copies étudiantes et des modèles de TP prêts à l’emploi.
-- [ ] Isoler l’exécution Docker et les ressources par étudiant/laboratoire avant toute exécution partagée.
-- [x] Ajouter PostgreSQL configurable et un outil de copie SQLite vers PostgreSQL pour les comptes, sessions, affectations et topologies courantes.
-- [x] Appliquer des quotas de laboratoires/nœuds, CPU/mémoire par laboratoire et par utilisateur actif ; expirer et nettoyer automatiquement les laboratoires.
+- [x] Isoler l’exécution Docker par étudiant/affectation ; limiter déploiement, arrêt, reset, terminal et remise à la copie autorisée.
+- [x] Ajouter PostgreSQL configurable et un outil de copie SQLite vers PostgreSQL pour les comptes, sessions, affectations et versions de topologie.
+- [x] Appliquer des quotas de laboratoires/nœuds, CPU/mémoire/stockage par laboratoire et CPU/mémoire par utilisateur actif.
+- [x] Rendre les versions immuables transactionnelles en base ; reprendre le nettoyage expiré après échec/redémarrage et coordonner les contrôleurs concurrents.
+- [x] Attribuer une identité UUID stable par copie étudiante et empêcher son altération lors de la sauvegarde.
 - [ ] Compléter la file de tâches, les identités de workers, mTLS et l’observabilité persistante de production.
 - [ ] Historiser les métriques et définir rétention, agrégation et consultation sur la durée.
-- [ ] Ajouter les quotas de stockage, des limites persistantes, et des notifications d’alerte ; rendre l’expiration résiliente aux redémarrages et aux workers indisponibles.
+- [ ] Ajouter des notifications d’alerte et une haute disponibilité des workers de nettoyage/exécution.
 - [x] Convertir les segments v2 et les interfaces déclarées en vrais réseaux Docker isolés.
 - [x] Rendre le scénario de démonstration exécutable avec `getent hosts`, sans dépendre de l’installation de `ping` dans les images minimales.
 - [x] Introduire la topologie v2 avec plusieurs segments Docker, interfaces IPv4 et routes statiques.
@@ -41,7 +43,8 @@
 - [x] Ajouter l’édition contrôlée des paramètres des nœuds personnalisés et du test de connectivité depuis l’interface.
 - [x] Ajouter des modèles v2 prêts à l’emploi pour un réseau local simple et un scénario de routage statique client–routeur–serveur.
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
-- [ ] Rendre DNS/CoreDNS et DHCP disponibles après la prise en charge de configurations, segments réseau isolés et droits minimaux.
+- [x] Ajouter CoreDNS avec des enregistrements A validés dans les sous-réseaux du laboratoire, une configuration générée et montée en lecture seule.
+- [ ] Ajouter DHCP/dnsmasq avec segments dédiés, configuration contrôlée et droits réseau minimaux.
 - [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
 - [ ] Ajouter WordPress, Jenkins, GitLab et Laravel avec dépendances, limites de ressources, volumes et images épinglées.
 - [ ] Évaluer pfSense, MikroTik CHR et Windows Server/Active Directory sur un moteur VM/KVM avec validation de licences.

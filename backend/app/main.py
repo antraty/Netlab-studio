@@ -95,20 +95,29 @@ control = ControlPlane(Path(os.getenv("NETLAB_TOPOLOGY", DEFAULT_TOPOLOGY)))
 
 def expire_laboratories() -> None:
     for laboratory in education_module.store.expired_laboratories():
+        is_student_laboratory = laboratory.get("kind") == "student"
+        set_status = (
+            lambda status: education_module.store.set_student_laboratory_status(
+                laboratory["user_id"], laboratory["assignment_id"], status,
+            )
+            if is_student_laboratory
+            else education_module.store.set_laboratory_status(laboratory["id"], status)
+        )
         try:
             result = build_orchestrator(laboratory["topology"]).action("down")
         except (RuntimeError, ValueError) as exc:
-            education_module.store.set_laboratory_status(laboratory["id"], "failed")
-            education_module.store.record_laboratory_event(laboratory["id"], None, f"expired cleanup failed: {exc}")
-            logger.error("Could not expire laboratory %s: %s", laboratory["id"], exc)
+            set_status("failed")
+            logger.error("Could not expire laboratory %s: %s", laboratory.get("id", laboratory.get("assignment_id")), exc)
             continue
         if result.ok:
-            education_module.store.set_laboratory_status(laboratory["id"], "expired")
-            education_module.store.record_laboratory_event(laboratory["id"], None, "expired: resources cleaned")
+            set_status("expired")
+            if not is_student_laboratory:
+                education_module.store.record_laboratory_event(laboratory["id"], None, "expired: resources cleaned")
         else:
-            education_module.store.set_laboratory_status(laboratory["id"], "failed")
-            education_module.store.record_laboratory_event(laboratory["id"], None, f"expired cleanup failed (exit {result.exit_code})")
-            logger.error("Could not clean up expired laboratory %s (exit %s)", laboratory["id"], result.exit_code)
+            set_status("failed")
+            if not is_student_laboratory:
+                education_module.store.record_laboratory_event(laboratory["id"], None, f"expired cleanup failed (exit {result.exit_code})")
+            logger.error("Could not clean up expired laboratory %s (exit %s)", laboratory.get("id", laboratory.get("assignment_id")), result.exit_code)
 
 
 @asynccontextmanager
@@ -184,7 +193,6 @@ def _primary_laboratory_for_user(user: dict[str, str]) -> dict[str, Any]:
         owned = next((lab for lab in labs if lab["role"] == "owner"), None)
         if owned is None:
             created = education_module.store.create_laboratory(user["id"], control.topology.to_topology_dict())
-            control.store.save(created["topology"], reason="initial")
             education_module.store.record_laboratory_event(created["id"], user["id"], "laboratory created from initial topology")
             laboratory = education_module.store.laboratory(created["id"], user["id"])
         else:
@@ -211,9 +219,8 @@ def create_laboratory(
 ) -> dict[str, Any]:
     try:
         created = education_module.store.create_laboratory(teacher["id"], request.topology)
-        control.store.save(created["topology"], reason="create")
         education_module.store.record_laboratory_event(created["id"], teacher["id"], "laboratory created")
-    except (EducationError, StorageError) as exc:
+    except EducationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"laboratory": {key: value for key, value in created.items() if key != "topology"}, "topology": created["topology"]}
 
@@ -236,10 +243,9 @@ def save_laboratory_topology(
     _laboratory_for_user(laboratory_id, user, write=True)
     topology = envelope.topology.to_topology_dict()
     try:
-        control.store.save(topology, reason="save")
         education_module.store.save_laboratory_topology(laboratory_id, user["id"], topology)
         education_module.store.record_laboratory_event(laboratory_id, user["id"], "topology saved")
-    except (EducationError, StorageError, ValueError, netlab.TopologyError) as exc:
+    except (EducationError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": topology}
 
@@ -273,10 +279,9 @@ def restore_laboratory_version(
 ) -> dict[str, Any]:
     laboratory = _laboratory_for_user(laboratory_id, user, write=True)
     try:
-        topology = control.store.restore(laboratory["name"], version)
-        education_module.store.save_laboratory_topology(laboratory_id, user["id"], topology)
+        topology = education_module.store.restore_laboratory_version(laboratory_id, user["id"], version)
         education_module.store.record_laboratory_event(laboratory_id, user["id"], f"topology restored from version {version}")
-    except (StorageError, EducationError, ValueError, netlab.TopologyError) as exc:
+    except (EducationError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": topology}
 
@@ -334,6 +339,90 @@ def run_laboratory_action(
     return {"ok": result.ok, "action": action, "exit_code": result.exit_code, "output": result.output}
 
 
+def _student_laboratory_for_user(assignment_id: str, user: dict[str, str]) -> dict[str, Any]:
+    if user["role"] != "student":
+        raise HTTPException(status_code=403, detail="student role required")
+    try:
+        laboratory = education_module.store.student_laboratory(user["id"], assignment_id)
+    except EducationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not laboratory:
+        raise HTTPException(status_code=404, detail="student laboratory not found; create your copy first")
+    if laboratory["status"] == "expired" or (
+        laboratory["expires_at"] is not None and laboratory["expires_at"] <= time.time()
+    ):
+        raise HTTPException(status_code=410, detail="student laboratory has expired; reset it to continue")
+    return laboratory
+
+
+@app.get("/api/education/my-assignments/{assignment_id}/runtime")
+def get_student_laboratory_runtime(
+    assignment_id: str,
+    student: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    laboratory = _student_laboratory_for_user(assignment_id, student)
+    try:
+        nodes = build_orchestrator(laboratory["topology"]).status()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"status": laboratory["status"], "expires_at": laboratory["expires_at"], "nodes": nodes}
+
+
+@app.post("/api/education/my-assignments/{assignment_id}/runtime/{action}")
+def run_student_laboratory_action(
+    assignment_id: str,
+    action: str,
+    student: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    if action not in {"up", "down", "verify"}:
+        raise HTTPException(status_code=404, detail="unknown action")
+    laboratory = _student_laboratory_for_user(assignment_id, student)
+    try:
+        if action == "up":
+            topology = education_module.store.claim_student_laboratory_run(student["id"], assignment_id)
+        else:
+            topology = laboratory["topology"]
+            if action == "verify" and laboratory["status"] != "running":
+                raise HTTPException(status_code=409, detail="student laboratory is not running")
+        result = build_orchestrator(topology).action(action)
+    except EducationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        if action != "verify":
+            education_module.store.set_student_laboratory_status(student["id"], assignment_id, "failed")
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if action == "up":
+        education_module.store.set_student_laboratory_status(
+            student["id"], assignment_id, "running" if result.ok else "failed",
+        )
+    elif action == "down":
+        education_module.store.set_student_laboratory_status(
+            student["id"], assignment_id, "stopped" if result.ok else "failed",
+        )
+    return {"ok": result.ok, "action": action, "exit_code": result.exit_code, "output": result.output}
+
+
+@app.post("/api/education/my-assignments/{assignment_id}/runtime/nodes/{node_name}/terminal")
+def run_student_laboratory_terminal(
+    assignment_id: str,
+    node_name: str,
+    request: TerminalRequest,
+    student: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    laboratory = _student_laboratory_for_user(assignment_id, student)
+    if laboratory["status"] != "running":
+        raise HTTPException(status_code=409, detail="student laboratory is not running")
+    if node_name not in {node["name"] for node in laboratory["topology"]["nodes"]}:
+        raise HTTPException(status_code=404, detail="node not found in this student laboratory")
+    try:
+        result = build_orchestrator(laboratory["topology"]).terminal(node_name, request.command)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": result.ok, "exit_code": result.exit_code, "output": result.output}
+
+
 @app.get("/api/topology", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])
 def get_topology(user: dict[str, str] = Depends(require_teacher)) -> dict[str, Topology]:
     return {"topology": Topology.model_validate(_primary_laboratory_for_user(user)["topology"])}
@@ -348,10 +437,9 @@ def save_topology(envelope: TopologyEnvelope, user: dict[str, str] = Depends(req
     try:
         topology = Topology.model_validate(topology_dict)
         netlab.validate_topology(topology_dict)
-        control.store.save(topology_dict)
         education_module.store.save_laboratory_topology(laboratory["id"], user["id"], topology_dict)
         education_module.store.record_laboratory_event(laboratory["id"], user["id"], "topology saved")
-    except (EducationError, StorageError, ValueError, netlab.TopologyError) as exc:
+    except (EducationError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": topology}
 
@@ -363,8 +451,8 @@ def list_versions(lab: str, user: dict[str, str] = Depends(require_user)) -> Ver
         raise HTTPException(status_code=404, detail="laboratory not found")
     _laboratory_for_user(record["id"], user)
     try:
-        return VersionsResponse(lab=record["name"], versions=control.store.list_versions(record["name"]))
-    except StorageError as exc:
+        return VersionsResponse(lab=record["name"], versions=education_module.store.list_laboratory_versions(record["id"]))
+    except EducationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -375,11 +463,10 @@ def restore_version(lab: str, version: int, user: dict[str, str] = Depends(requi
         raise HTTPException(status_code=404, detail="laboratory not found")
     _laboratory_for_user(record["id"], user, write=True)
     try:
-        topology_dict = control.store.restore(record["name"], version)
-        education_module.store.save_laboratory_topology(record["id"], user["id"], topology_dict)
+        topology_dict = education_module.store.restore_laboratory_version(record["id"], user["id"], version)
         education_module.store.record_laboratory_event(record["id"], user["id"], f"topology restored from version {version}")
         topology = Topology.model_validate(topology_dict)
-    except (EducationError, StorageError, ValueError, netlab.TopologyError) as exc:
+    except (EducationError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": topology}
 
@@ -395,11 +482,10 @@ def clone_laboratory(lab: str, request: CloneRequest, user: dict[str, str] = Dep
         source = dict(record["topology"])
         source["lab"] = request.new_lab
         source.pop("laboratory_id", None)
-        created = education_module.store.create_laboratory(user["id"], source)
-        control.store.save(created["topology"], reason=f"clone:{record['name']}")
+        created = education_module.store.create_laboratory(user["id"], source, version_reason=f"clone:{record['name']}")
         education_module.store.record_laboratory_event(created["id"], user["id"], f"cloned from {record['name']}")
         topology = Topology.model_validate(created["topology"])
-    except (EducationError, StorageError, ValueError, netlab.TopologyError) as exc:
+    except (EducationError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": topology}
 
@@ -411,8 +497,8 @@ def export_laboratory(lab: str, user: dict[str, str] = Depends(require_user)) ->
         raise HTTPException(status_code=404, detail="laboratory not found")
     _laboratory_for_user(record["id"], user)
     try:
-        return control.store.export(record["name"])
-    except StorageError as exc:
+        return education_module.store.export_laboratory(record["id"], user["id"])
+    except EducationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
@@ -421,11 +507,10 @@ def import_laboratory(envelope: TopologyEnvelope, user: dict[str, str] = Depends
     try:
         imported = envelope.topology.to_topology_dict()
         imported.pop("laboratory_id", None)
-        created = education_module.store.create_laboratory(user["id"], imported)
-        control.store.save(created["topology"], reason="import")
+        created = education_module.store.create_laboratory(user["id"], imported, version_reason="import")
         education_module.store.record_laboratory_event(created["id"], user["id"], "laboratory imported")
         topology = Topology.model_validate(created["topology"])
-    except (EducationError, StorageError, ValueError, netlab.TopologyError) as exc:
+    except (EducationError, ValueError, netlab.TopologyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"topology": topology}
 
@@ -513,8 +598,26 @@ async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
     if not user:
         await websocket.close(code=1008, reason="authentication required")
         return
+    assignment_id = websocket.query_params.get("assignment_id")
     laboratory_id = websocket.query_params.get("laboratory_id")
-    if laboratory_id:
+    if user["role"] == "student":
+        if not assignment_id:
+            await websocket.close(code=1008, reason="student assignment is required")
+            return
+        try:
+            student_laboratory = _student_laboratory_for_user(assignment_id, user)
+            if student_laboratory["status"] != "running":
+                await websocket.close(code=1008, reason="student laboratory is not running")
+                return
+            if node_name not in {node["name"] for node in student_laboratory["topology"]["nodes"]}:
+                await websocket.close(code=1008, reason="node not found in student laboratory")
+                return
+        except HTTPException as exc:
+            await websocket.close(code=1008, reason=exc.detail)
+            return
+        selected_orchestrator = build_orchestrator(student_laboratory["topology"])
+        laboratory_id = None
+    elif laboratory_id:
         try:
             laboratory = _laboratory_for_user(laboratory_id, user, write=True)
         except HTTPException as exc:
@@ -546,12 +649,13 @@ async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
                 except WebSocketDisconnect:
                     break
                 session.write(command)
-                await asyncio.to_thread(
-                    education_module.store.record_laboratory_event,
-                    laboratory_id,
-                    user["id"],
-                    f"terminal websocket {node_name}: command received",
-                )
+                if laboratory_id is not None:
+                    await asyncio.to_thread(
+                        education_module.store.record_laboratory_event,
+                        laboratory_id,
+                        user["id"],
+                        f"terminal websocket {node_name}: command received",
+                    )
                 receive_task = asyncio.create_task(websocket.receive_text())
             await asyncio.sleep(0.05)
     except (ValueError, FileNotFoundError, RuntimeError) as exc:

@@ -17,6 +17,7 @@ export interface Assignment {
   title: string
   group_name: string
   status: 'assigned' | 'in_progress' | 'submitted'
+  runtime_status: 'stopped' | 'running' | 'expired' | 'failed'
   created_at: number
   submitted_at: number | null
   topology: Topology
@@ -156,11 +157,14 @@ export const api = {
   createGroup: (name: string) => request<{ group: Group }>('/api/education/groups', { method: 'POST', body: JSON.stringify({ name }) }),
   addMember: (groupId: string, email: string) => request<{ ok: boolean }>(`/api/education/groups/${encodeURIComponent(groupId)}/members`, { method: 'POST', body: JSON.stringify({ email }) }),
   assign: (groupId: string, title: string, topology: Topology) => request<{ assignment: { id: string; title: string } }>(`/api/education/groups/${encodeURIComponent(groupId)}/assignments`, { method: 'POST', body: JSON.stringify({ title, topology }) }),
-  submissions: (groupId: string) => request<{ submissions: Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; submitted_at: number | null }> }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
+  submissions: (groupId: string) => request<{ submissions: Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; runtime_status: string; submitted_at: number | null }> }>(`/api/education/groups/${encodeURIComponent(groupId)}/submissions`),
   myAssignments: () => request<{ assignments: Assignment[] }>('/api/education/my-assignments'),
   cloneAssignment: (assignmentId: string) => request<{ topology: Topology }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/clone`, { method: 'POST', body: '{}' }),
   saveAssignmentTopology: (assignmentId: string, topology: Topology) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/topology`, { method: 'PUT', body: JSON.stringify({ topology }) }),
   submitAssignment: (assignmentId: string) => request<{ ok: boolean }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/submit`, { method: 'POST', body: '{}' }),
+  studentRuntime: (assignmentId: string) => request<{ status: Assignment['runtime_status']; expires_at: number | null; nodes: StatusNode[] }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime`),
+  studentRuntimeAction: (assignmentId: string, action: 'up' | 'down' | 'verify') => request<{ ok: boolean; action: string; exit_code: number; output: string }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime/${action}`, { method: 'POST', body: '{}' }),
+  studentTerminal: (assignmentId: string, node: string, command: string[]) => request<{ ok: boolean; output: string; exit_code: number }>(`/api/education/my-assignments/${encodeURIComponent(assignmentId)}/runtime/nodes/${encodeURIComponent(node)}/terminal`, { method: 'POST', body: JSON.stringify({ command }) }),
   topology: () => request<{ topology: Topology }>('/api/topology'),
   status: () => request<{ nodes: StatusNode[] }>('/api/status'),
   logs: () => request<{ logs: string[] }>('/api/logs'),

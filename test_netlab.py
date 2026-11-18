@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from netlab import TopologyError, deploy, docker_run_args, load_topology, validate_topology
+from netlab import TopologyError, deploy, docker_run_args, load_topology, network_gateway, validate_topology
 
 
 ROOT = Path(__file__).parent
@@ -79,6 +79,36 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(len(connects), 1)
         self.assertEqual(len(routes), 2)
         self.assertIn("10.0.2.0/24", routes[0])
+        self.assertIn("--gateway", creates[0])
+        self.assertEqual(creates[0][creates[0].index("--gateway") + 1], "10.0.1.254")
+        client = topology["nodes"][0]
+        client_args = docker_run_args(topology, client, "netlab-test-lan")
+        self.assertIn("--cap-add", client_args)
+        self.assertIn("NET_ADMIN", client_args)
+        self.assertNotIn("net.ipv4.ip_forward=1", client_args)
+
+    def test_docker_gateway_avoids_addresses_assigned_to_topology_nodes(self):
+        topology = load_topology(ROOT / "topology.json")
+        self.assertEqual(network_gateway(topology, topology["networks"][0]), "10.0.1.254")
+        network = {"name": "unoccupied", "subnet": "192.0.2.0/24"}
+        self.assertEqual(network_gateway(topology, network), "192.0.2.1")
+
+    def test_failed_container_start_removes_partial_container_and_networks(self):
+        topology = load_topology(ROOT / "topology.json")
+        calls: list[tuple[str, ...]] = []
+
+        def fake_docker(*args: str, capture: bool = False):
+            calls.append(args)
+            if args[:2] == ("network", "inspect") or args[:2] == ("rm", "-f"):
+                return subprocess.CompletedProcess(args, 1, "", "not found")
+            if args and args[0] == "run" and "netlab-static-routing-demo-router-linux" in args:
+                return subprocess.CompletedProcess(args, 125, "", "start failed")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch("netlab.docker", side_effect=fake_docker):
+            self.assertEqual(deploy(topology), 125)
+        self.assertIn(("rm", "-f", "netlab-static-routing-demo-router-linux"), calls)
+        self.assertEqual(len([call for call in calls if call[:2] == ("network", "rm")]), 2)
 
     def test_docker_resources_include_laboratory_uuid_label(self):
         topology = load_topology(ROOT / "topology.json")

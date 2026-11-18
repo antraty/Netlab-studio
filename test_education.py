@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -101,12 +102,99 @@ class EducationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         copied = response.json()["topology"]
         self.assertIn("-student-", copied["lab"])
+        self.assertEqual(str(uuid.UUID(copied["laboratory_id"])), copied["laboratory_id"])
+        response = student.put(
+            f"/api/education/my-assignments/{assignment_id}/topology",
+            headers=self.csrf_headers(student),
+            json={"topology": copied},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        persisted = student.get("/api/education/my-assignments").json()["assignments"][0]["topology"]
+        self.assertEqual(persisted["laboratory_id"], copied["laboratory_id"])
+        tampered = dict(copied)
+        tampered["laboratory_id"] = "00000000-0000-0000-0000-000000000001"
+        response = student.put(
+            f"/api/education/my-assignments/{assignment_id}/topology",
+            headers=self.csrf_headers(student),
+            json={"topology": tampered},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
         response = student.post("/api/up", headers=self.csrf_headers(student), json={})
         self.assertEqual(response.status_code, 403)
+
+        from backend.app import main
+        with patch.object(main, "build_orchestrator") as build:
+            build.return_value.status.return_value = [{"name": "client-ubuntu", "state": "running"}]
+            build.return_value.action.return_value = SimpleNamespace(ok=True, exit_code=0, output="runtime ok")
+            build.return_value.terminal.return_value = SimpleNamespace(ok=True, exit_code=0, output="client-ubuntu")
+            runtime = student.get(f"/api/education/my-assignments/{assignment_id}/runtime")
+            self.assertEqual(runtime.status_code, 200, runtime.text)
+            self.assertEqual(runtime.json()["status"], "stopped")
+            deployed = student.post(
+                f"/api/education/my-assignments/{assignment_id}/runtime/up",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+            self.assertEqual(deployed.status_code, 200, deployed.text)
+            self.assertEqual(deployed.json()["output"], "runtime ok")
+            self.assertEqual(build.call_args.args[0]["laboratory_id"], copied["laboratory_id"])
+            reset_while_running = student.post(
+                f"/api/education/my-assignments/{assignment_id}/clone",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+            self.assertEqual(reset_while_running.status_code, 409, reset_while_running.text)
+            blocked_terminal = student.post(
+                f"/api/education/my-assignments/{assignment_id}/runtime/nodes/not-my-node/terminal",
+                headers=self.csrf_headers(student),
+                json={"command": ["hostname"]},
+            )
+            self.assertEqual(blocked_terminal.status_code, 404)
+            terminal = student.post(
+                f"/api/education/my-assignments/{assignment_id}/runtime/nodes/client-ubuntu/terminal",
+                headers=self.csrf_headers(student),
+                json={"command": ["hostname"]},
+            )
+            self.assertEqual(terminal.status_code, 200, terminal.text)
+            stopped = student.post(
+                f"/api/education/my-assignments/{assignment_id}/runtime/down",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+            self.assertEqual(stopped.status_code, 200, stopped.text)
+            reset = student.post(
+                f"/api/education/my-assignments/{assignment_id}/clone",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+            self.assertEqual(reset.status_code, 200, reset.text)
+            redeployed = student.post(
+                f"/api/education/my-assignments/{assignment_id}/runtime/up",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+            self.assertEqual(redeployed.status_code, 200, redeployed.text)
+            student_id = student.get("/api/auth/me").json()["user"]["id"]
+            with education.store._connect() as db:
+                db.execute(
+                    "UPDATE student_lab_runtime SET expires_at=?,updated_at=? "
+                    "WHERE assignment_id=? AND user_id=?",
+                    (0, 0, assignment_id, student_id),
+                )
+            main.expire_laboratories()
+            expired_runtime = student.get(f"/api/education/my-assignments/{assignment_id}/runtime")
+            self.assertEqual(expired_runtime.status_code, 410)
+            reset_expired = student.post(
+                f"/api/education/my-assignments/{assignment_id}/clone",
+                headers=self.csrf_headers(student),
+                json={},
+            )
+            self.assertEqual(reset_expired.status_code, 200, reset_expired.text)
 
         response = self.client.get(f"/api/education/groups/{group_id}/submissions")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["submissions"][0]["status"], "in_progress")
+        self.assertEqual(response.json()["submissions"][0]["runtime_status"], "stopped")
         student.close()
 
     def test_private_api_requires_login_and_csrf(self):
@@ -119,7 +207,7 @@ class EducationApiTests(unittest.TestCase):
         })
         response = self.client.get("/api/services")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache"})
+        self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache", "coredns"})
         laboratory = self.client.get("/api/laboratories").json()["laboratories"][0]
         from backend.app.main import control
         sample = {
@@ -195,6 +283,22 @@ class EducationApiTests(unittest.TestCase):
         versions = self.client.get(f"/api/laboratories/{laboratory_id}/versions")
         self.assertEqual(versions.status_code, 200, versions.text)
         self.assertEqual(len(versions.json()["versions"]), 1)
+        saved = self.client.put(
+            f"/api/laboratories/{laboratory_id}/topology",
+            headers=teacher_headers,
+            json={"topology": created.json()["topology"]},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        restored = self.client.post(
+            f"/api/laboratories/{laboratory_id}/versions/1/restore",
+            headers=teacher_headers,
+            json={},
+        )
+        self.assertEqual(restored.status_code, 200, restored.text)
+        exported = self.client.get(f"/api/laboratories/{laboratory_id}/export")
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(len(exported.json()["versions"]), 3)
+        self.assertEqual(exported.json()["versions"][0]["reason"], "restore:1")
 
         with patch("backend.app.main.build_orchestrator") as build:
             build.return_value.action.return_value = SimpleNamespace(ok=True, exit_code=0, output="")
@@ -275,11 +379,57 @@ class EducationApiTests(unittest.TestCase):
                 education.store.create_laboratory(teacher["id"], topology)
         with education.store._connect() as db:
             db.execute(
-                "UPDATE laboratories SET status='running',expires_at=? WHERE id=?",
-                (0, laboratory["id"]),
+                "UPDATE laboratories SET status='running',expires_at=?,updated_at=? WHERE id=?",
+                (0, 0, laboratory["id"]),
             )
         expired = education.store.expired_laboratories()
         self.assertEqual([item["id"] for item in expired], [laboratory["id"]])
+        self.assertEqual(education.store.expired_laboratories(), [])
+        with education.store._connect() as db:
+            db.execute(
+                "UPDATE laboratories SET updated_at=? WHERE id=?",
+                (0, laboratory["id"]),
+            )
+        self.assertEqual(
+            [item["id"] for item in education.store.expired_laboratories()],
+            [laboratory["id"]],
+        )
+
+    def test_laboratory_versions_survive_reopening_the_database(self):
+        teacher = education.store.create_user(
+            "versions@example.test", "Versions", "long-password-123", "teacher",
+        )
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        laboratory = education.store.create_laboratory(teacher["id"], topology)
+        education.store.save_laboratory_topology(
+            laboratory["id"], teacher["id"], laboratory["topology"], reason="edit",
+        )
+
+        reopened = EducationStore(Path(self.tempdir.name) / "education.sqlite3")
+        versions = reopened.list_laboratory_versions(laboratory["id"])
+        self.assertEqual([version["version"] for version in versions], [2, 1])
+        self.assertEqual(versions[0]["reason"], "edit")
+
+    def test_laboratory_storage_quota_rejects_version_without_changing_current_topology(self):
+        teacher = education.store.create_user(
+            "storage@example.test", "Storage", "long-password-123", "teacher",
+        )
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        laboratory = education.store.create_laboratory(teacher["id"], topology)
+        with education.store._connect() as db:
+            db.execute(
+                "UPDATE laboratory_versions SET topology_json=? WHERE laboratory_id=?",
+                ("x" * (1024 * 1024), laboratory["id"]),
+            )
+
+        with patch.dict(os.environ, {"NETLAB_MAX_STORAGE_MB_PER_LAB": "1"}):
+            with self.assertRaisesRegex(education.EducationError, "storage quota"):
+                education.store.save_laboratory_topology(
+                    laboratory["id"], teacher["id"], laboratory["topology"],
+                )
+        current = education.store.laboratory(laboratory["id"], teacher["id"])
+        self.assertEqual(current["topology"], laboratory["topology"])
+        self.assertEqual(len(education.store.list_laboratory_versions(laboratory["id"])), 1)
 
     def test_cpu_and_memory_quotas_are_enforced_before_running(self):
         teacher = education.store.create_user(
@@ -310,8 +460,8 @@ class EducationApiTests(unittest.TestCase):
         laboratory = education.store.create_laboratory(teacher["id"], topology)
         with education.store._connect() as db:
             db.execute(
-                "UPDATE laboratories SET status='running',expires_at=? WHERE id=?",
-                (0, laboratory["id"]),
+                "UPDATE laboratories SET status='running',expires_at=?,updated_at=? WHERE id=?",
+                (0, 0, laboratory["id"]),
             )
         from backend.app import main
         with patch.object(main, "build_orchestrator") as build:

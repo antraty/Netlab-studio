@@ -32,10 +32,12 @@ const users = ref<User[]>([])
 const serviceCatalog = ref<ServiceProfile[]>([])
 const selectedServiceId = ref('nginx')
 const selectedTemplateId = ref('static-routing')
-const submissions = ref<Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; submitted_at: number | null }>>([])
+const submissions = ref<Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; runtime_status: string; submitted_at: number | null }>>([])
 const assignments = ref<Assignment[]>([])
 const activeAssignmentId = ref('')
 const assignmentDraft = ref('')
+const studentTerminalNode = ref('')
+const studentTerminalCommand = ref('hostname')
 const newStudent = ref({ email: '', display_name: '', password: '' })
 const newGroupName = ref('')
 const memberEmail = ref('')
@@ -250,21 +252,44 @@ async function loadAssignments() {
     assignments.value = (await api.myAssignments()).assignments
     activeAssignmentId.value = assignments.value[0]?.id ?? ''
     assignmentDraft.value = activeAssignment.value ? JSON.stringify(activeAssignment.value.topology, null, 2) : ''
+    await refreshStudentRuntime()
   } catch (error) { showError(error) }
 }
 function selectAssignment(id: string) {
   activeAssignmentId.value = id
   const item = activeAssignment.value
   assignmentDraft.value = item ? JSON.stringify(item.topology, null, 2) : ''
+  studentTerminalNode.value = item?.topology.nodes[0]?.name ?? ''
+  void refreshStudentRuntime()
+}
+async function refreshStudentRuntime() {
+  const item = activeAssignment.value
+  if (!item?.topology.laboratory_id) { statuses.value = []; return }
+  try {
+    const runtime = await api.studentRuntime(item.id)
+    item.runtime_status = runtime.status
+    statuses.value = runtime.nodes
+    studentTerminalNode.value = item.topology.nodes[0]?.name ?? ''
+  } catch (error) { showError(error) }
 }
 async function cloneAssignment() {
-  if (!activeAssignment.value) return
+  if (!activeAssignment.value) return false
   try {
+    if (['running', 'failed'].includes(activeAssignment.value.runtime_status)) {
+      const stopped = await api.studentRuntimeAction(activeAssignment.value.id, 'down')
+      if (!stopped.ok) throw new Error(`Impossible de nettoyer le laboratoire (code ${stopped.exit_code}).`)
+      activeAssignment.value.runtime_status = 'stopped'
+    }
     const result = await api.cloneAssignment(activeAssignment.value.id)
     activeAssignment.value.topology = result.topology
     activeAssignment.value.status = 'in_progress'
+    activeAssignment.value.runtime_status = 'stopped'
     assignmentDraft.value = JSON.stringify(result.topology, null, 2)
-  } catch (error) { showError(error) }
+    statuses.value = []
+    studentTerminalNode.value = result.topology.nodes[0]?.name ?? ''
+    pageError.value = 'Copie réinitialisée.'
+    return true
+  } catch (error) { showError(error); return false }
 }
 async function saveAssignment() {
   if (!activeAssignment.value) return false
@@ -279,10 +304,39 @@ async function saveAssignment() {
 async function submitAssignment() {
   if (!activeAssignment.value) return
   try {
-    if (activeAssignment.value.status === 'assigned') await cloneAssignment()
+    if (['running', 'failed'].includes(activeAssignment.value.runtime_status)) {
+      const stopped = await api.studentRuntimeAction(activeAssignment.value.id, 'down')
+      if (!stopped.ok) throw new Error(`Impossible de nettoyer le laboratoire (code ${stopped.exit_code}).`)
+      activeAssignment.value.runtime_status = 'stopped'
+    }
+    if (activeAssignment.value.status === 'assigned' && !await cloneAssignment()) return
     if (!await saveAssignment()) return
     await api.submitAssignment(activeAssignment.value.id)
     activeAssignment.value.status = 'submitted'; pageError.value = 'Travail remis à l’enseignant.'
+  } catch (error) { showError(error) }
+}
+async function studentRuntimeAction(action: 'up' | 'down' | 'verify') {
+  const item = activeAssignment.value
+  if (!item) return
+  try {
+    if (action === 'up') {
+      if (item.status === 'assigned' && !await cloneAssignment()) return
+      if (!await saveAssignment()) return
+    }
+    const result = await api.studentRuntimeAction(item.id, action)
+    terminalOutput.value = result.output || (result.ok ? `${action} : terminé` : `${action} : échec (code ${result.exit_code})`)
+    if (action === 'up') item.runtime_status = result.ok ? 'running' : 'failed'
+    if (action === 'down') item.runtime_status = result.ok ? 'stopped' : 'failed'
+    if (result.ok) await refreshStudentRuntime()
+  } catch (error) { showError(error) }
+}
+async function runStudentTerminal() {
+  const item = activeAssignment.value
+  const command = studentTerminalCommand.value.trim().split(/\s+/).filter(Boolean)
+  if (!item || !studentTerminalNode.value || !command.length) return
+  try {
+    const result = await api.studentTerminal(item.id, studentTerminalNode.value, command)
+    terminalOutput.value = result.output || (result.ok ? 'Commande terminée.' : `Commande échouée (code ${result.exit_code}).`)
   } catch (error) { showError(error) }
 }
 
@@ -361,6 +415,16 @@ function removeRoute(node: Node, index: number) {
   node.routes.splice(index, 1)
   dirty.value = true
 }
+function addDNSRecord(node: Node) {
+  node.dns_records ??= []
+  node.dns_records.push({ name: `host-${node.dns_records.length + 1}.lab.test`, ipv4: '' })
+  dirty.value = true
+}
+function removeDNSRecord(node: Node, index: number) {
+  if (!node.dns_records) return
+  node.dns_records.splice(index, 1)
+  dirty.value = true
+}
 function nodeCommand(node: Node) { return node.command.join(' ') }
 function setNodeCommand(node: Node, value: string) {
   node.command = value.trim().split(/\s+/).filter(Boolean)
@@ -414,6 +478,7 @@ function addCatalogService() {
     name, image: profile.image, command: [...profile.command], service_id: profile.id,
     position: { x: 60 + topology.value.nodes.length * 210, y: 110 },
   }
+  if (profile.id === 'coredns') node.dns_records = []
   if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   if (publishedPort !== undefined) node.published_port = publishedPort
   topology.value.nodes.push(node); selected.value = name; dirty.value = true
@@ -546,13 +611,30 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
     <main>
       <section class="panel">
         <div class="section-title"><div><h2>Mes travaux pratiques</h2><span>{{ assignments.length }} affectation(s)</span></div><button class="secondary" @click="loadAssignments">Actualiser</button></div>
-        <p class="hint">Les topologies sont des copies personnelles sauvegardées. Elles ne lancent pas de conteneurs : l’exécution isolée par étudiant n’est pas encore disponible.</p>
+        <p class="hint">Chaque copie possède son propre identifiant et ses propres ressources Docker. Arrêtez le laboratoire avant de le réinitialiser ou de le remettre.</p>
         <p v-if="!assignments.length" class="hint">Aucun laboratoire ne vous a encore été affecté.</p>
         <div v-else class="student-layout">
           <nav class="assignment-list"><button v-for="item in assignments" :key="item.id" class="secondary assignment-item" :class="{ active: activeAssignmentId === item.id }" @click="selectAssignment(item.id)"><strong>{{ item.title }}</strong><small>{{ item.group_name }} · {{ item.status }}</small></button></nav>
           <div v-if="activeAssignment" class="assignment-editor">
-            <div class="section-title"><div><h2>{{ activeAssignment.title }}</h2><span>{{ activeAssignment.group_name }} · {{ activeAssignment.status }}</span></div><div class="tools"><button class="secondary" @click="cloneAssignment">Créer / réinitialiser ma copie</button><button class="secondary" @click="saveAssignment">Enregistrer la copie</button><button @click="submitAssignment">Remettre</button></div></div>
+            <div class="section-title"><div><h2>{{ activeAssignment.title }}</h2><span>{{ activeAssignment.group_name }} · {{ activeAssignment.status }} · runtime {{ activeAssignment.runtime_status }}</span></div><div class="tools"><button class="secondary" @click="cloneAssignment">{{ activeAssignment.topology.laboratory_id ? 'Réinitialiser ma copie' : 'Créer ma copie' }}</button><button class="secondary" :disabled="['running', 'failed'].includes(activeAssignment.runtime_status)" @click="saveAssignment">Enregistrer la copie</button><button @click="submitAssignment">Remettre</button></div></div>
+            <div class="tools">
+              <button :disabled="activeAssignment.runtime_status === 'running' || activeAssignment.runtime_status === 'failed'" @click="studentRuntimeAction('up')">Déployer ma copie</button>
+              <button class="secondary" :disabled="activeAssignment.runtime_status === 'stopped' || activeAssignment.runtime_status === 'expired'" @click="studentRuntimeAction('down')">Arrêter</button>
+              <button class="secondary" :disabled="activeAssignment.runtime_status !== 'running'" @click="studentRuntimeAction('verify')">Vérifier la connectivité</button>
+            </div>
             <label class="json-label">Topologie JSON personnelle<textarea v-model="assignmentDraft" spellcheck="false"></textarea></label>
+            <div v-if="activeAssignment.topology.laboratory_id" class="terminal-panel">
+              <h3>Terminal de ma copie</h3>
+              <div class="tools">
+                <select v-model="studentTerminalNode" aria-label="Nœud étudiant">
+                  <option v-for="node in activeAssignment.topology.nodes" :key="node.name" :value="node.name">{{ node.name }}</option>
+                </select>
+                <input v-model="studentTerminalCommand" aria-label="Commande autorisée" @keyup.enter="runStudentTerminal" />
+                <button :disabled="activeAssignment.runtime_status !== 'running'" @click="runStudentTerminal">Exécuter</button>
+              </div>
+              <pre>{{ terminalOutput }}</pre>
+              <p class="hint">Commandes disponibles : hostname, uname, ip, ping.</p>
+            </div>
           </div>
         </div>
       </section>
@@ -566,7 +648,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <template v-if="topology">
       <section class="toolbar"><button :disabled="!canModifyLaboratory" @click="action('up')">Déployer</button><button class="secondary" :disabled="!canModifyLaboratory" @click="action('verify')">Tester la connectivité</button><button class="danger" :disabled="!canModifyLaboratory" @click="action('down')">Arrêter</button><button class="secondary" :disabled="!canModifyLaboratory" @click="save">Nouvelle version</button><button class="secondary" :disabled="!canModifyLaboratory" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button v-if="ownsLaboratory" class="secondary" @click="shareLaboratory">Partager</button><button class="secondary" @click="exportLab">Exporter</button><label v-if="canModifyLaboratory" class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button></section>
-      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Profils disponibles : Nginx, Apache et CoreDNS. DNS reste interne aux segments du laboratoire ; les ports hôte sont liés uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
         <div class="network-editor-grid">
@@ -601,6 +683,17 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
               <button class="icon-button danger" @click="removeRoute(selectedNode, index)">×</button>
             </div>
           </div>
+          <template v-if="selectedNode.service_id === 'coredns'">
+            <div class="section-title routes-heading"><div><h3>Entrées DNS A</h3><span>adresses du laboratoire uniquement</span></div><button class="secondary" @click="addDNSRecord(selectedNode)">Ajouter une entrée</button></div>
+            <div class="route-list">
+              <div v-for="(record, index) in selectedNode.dns_records" :key="`${selectedNode.name}-dns-${index}`" class="interface-row">
+                <input v-model="record.name" aria-label="Nom DNS" placeholder="serveur.lab.test" @input="dirty = true" />
+                <input v-model="record.ipv4" aria-label="Adresse IPv4 DNS" placeholder="10.0.1.10" @input="dirty = true" />
+                <button class="icon-button danger" @click="removeDNSRecord(selectedNode, index)">×</button>
+              </div>
+            </div>
+            <p class="hint">CoreDNS génère son Corefile à partir de ces entrées et le monte en lecture seule. La configuration n’accepte que des noms DNS et des adresses des sous-réseaux déclarés.</p>
+          </template>
         </div>
         <p v-else class="hint">Sélectionnez un nœud dans le graphe pour modifier ses interfaces et ses routes.</p>
       </section>
@@ -624,7 +717,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
           <div class="panel nested"><h3>Partager le laboratoire courant</h3><label>Titre de l’affectation<input v-model="assignmentTitle" :placeholder="topology.lab" maxlength="120" /></label><button :disabled="!selectedGroupId" @click="publishAssignment">Affecter au groupe</button><p class="hint">La topologie actuelle est copiée comme instantané ; les changements ultérieurs ne modifient pas l’affectation.</p></div>
           <div class="panel nested"><h3>Élèves enregistrés</h3><ul class="compact-list"><li v-for="student in users.filter(item => item.role === 'student')" :key="student.id">{{ student.display_name }} <small>{{ student.email }}</small></li><li v-if="!users.some(item => item.role === 'student')" class="muted">Aucun étudiant créé.</li></ul></div>
         </div>
-        <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Remis</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.submitted_at ? new Date(item.submitted_at * 1000).toLocaleString() : '—' }}</td></tr><tr v-if="!submissions.length"><td colspan="4" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
+        <div class="submissions"><h3>Suivi des remises {{ groups.find(group => group.id === selectedGroupId)?.name ? `— ${groups.find(group => group.id === selectedGroupId)?.name}` : '' }}</h3><table><thead><tr><th>TP</th><th>Étudiant</th><th>Statut</th><th>Runtime</th><th>Remis</th></tr></thead><tbody><tr v-for="(item, index) in submissions" :key="`${item.assignment_id}-${item.email}-${index}`"><td>{{ item.title }}</td><td>{{ item.display_name }} <small>{{ item.email }}</small></td><td>{{ item.status }}</td><td>{{ item.runtime_status }}</td><td>{{ item.submitted_at ? new Date(item.submitted_at * 1000).toLocaleString() : '—' }}</td></tr><tr v-if="!submissions.length"><td colspan="5" class="muted">Aucune affectation ou remise pour ce groupe.</td></tr></tbody></table></div>
       </section>
       <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal WebSocket</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }} · {{ selectedNode ? nodeStatus(selectedNode.name) : '' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
       </template>

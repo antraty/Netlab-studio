@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +46,31 @@ class Route(BaseModel):
     via: str
 
 
+class DNSRecord(BaseModel):
+    name: str
+    ipv4: str
+
+    @field_validator("name")
+    @classmethod
+    def valid_hostname(cls, value: str) -> str:
+        value = value.strip().rstrip(".").lower()
+        labels = value.split(".")
+        if len(value) > 253 or not labels or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError("DNS name must be a valid hostname")
+        return value
+
+    @field_validator("ipv4")
+    @classmethod
+    def valid_ipv4(cls, value: str) -> str:
+        try:
+            return str(ipaddress.IPv4Address(value))
+        except ipaddress.AddressValueError as exc:
+            raise ValueError("DNS record address must be IPv4") from exc
+
+
 class Node(BaseModel):
     name: str
     image: str
@@ -55,6 +82,7 @@ class Node(BaseModel):
     router: bool = False
     interfaces: list[Interface] = Field(default_factory=list)
     routes: list[Route] = Field(default_factory=list)
+    dns_records: list[DNSRecord] | None = None
 
     @field_validator("name", "image")
     @classmethod
@@ -132,6 +160,10 @@ class Topology(BaseModel):
         host_ports: set[int] = set()
         for node in self.nodes:
             validate_catalog_node(node.service_id, node.image, node.command, node.published_port)
+            if node.service_id == "coredns" and not node.dns_records:
+                raise ValueError(f"CoreDNS node {node.name} requires at least one A record")
+            if node.service_id != "coredns" and node.dns_records:
+                raise ValueError(f"DNS records are only supported on CoreDNS nodes")
             if node.published_port is not None:
                 if node.published_port in host_ports:
                     raise ValueError("published host ports must be unique in a topology")
