@@ -44,6 +44,7 @@ const selectedSubmission = ref<{ assignment_id: string; student_id: string; titl
 const teacherSubmissionHistory = ref<SubmissionAttempt[]>([])
 const feedbackDrafts = ref<Record<string, string>>({})
 const newStudent = ref({ email: '', display_name: '', password: '' })
+const newTeacher = ref({ email: '', display_name: '', password: '' })
 const newGroupName = ref('')
 const memberEmail = ref('')
 const assignmentTitle = ref('')
@@ -233,6 +234,10 @@ async function loadEducation() {
 }
 async function createStudent() {
   try { await api.createStudent(newStudent.value); newStudent.value = { email: '', display_name: '', password: '' }; await loadEducation(); pageError.value = 'Compte étudiant créé. Communiquez son adresse et son mot de passe par un canal sûr.' }
+  catch (error) { showError(error) }
+}
+async function createTeacher() {
+  try { await api.createTeacher(newTeacher.value); newTeacher.value = { email: '', display_name: '', password: '' }; await loadEducation(); pageError.value = 'Compte enseignant créé. Transmettez ses identifiants par un canal sûr.' }
   catch (error) { showError(error) }
 }
 async function createGroup() {
@@ -808,6 +813,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
         <div class="section-title"><div><h2>Partage pédagogique</h2><span>Comptes, groupes, affectations et remises</span></div><button class="secondary" @click="loadEducation">Actualiser</button></div>
         <p class="hint">Chaque étudiant reçoit une copie isolée et exécutable. Les modèles et topologies affectés restent des instantanés indépendants.</p>
         <div class="education-grid">
+          <form class="stack-form panel nested" @submit.prevent="createTeacher"><h3>Créer un autre compte enseignant</h3><label>Nom affiché<input v-model="newTeacher.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newTeacher.email" type="email" required /></label><label>Mot de passe initial (12+)<input v-model="newTeacher.password" type="password" minlength="12" required /></label><button>Créer le compte enseignant</button><p class="hint">Les enseignants sont créés par un enseignant connecté. Transmettez le mot de passe initial séparément.</p></form>
           <form class="stack-form panel nested" @submit.prevent="createStudent"><h3>Créer un compte étudiant</h3><label>Nom affiché<input v-model="newStudent.display_name" required maxlength="100" /></label><label>E-mail<input v-model="newStudent.email" type="email" required /></label><label>Mot de passe initial (12+)<input v-model="newStudent.password" type="password" minlength="12" required /></label><button>Créer le compte</button></form>
           <form class="stack-form panel nested" @submit.prevent="createGroup"><h3>Créer un groupe</h3><label>Nom du groupe<input v-model="newGroupName" required maxlength="100" /></label><button>Créer le groupe</button><label>Groupe actif<select v-model="selectedGroupId" @change="loadSubmissions"><option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }} ({{ group.members }})</option></select></label><label>Ajouter l’étudiant (e-mail)<input v-model="memberEmail" type="email" required /></label><button class="secondary" type="button" :disabled="!selectedGroupId" @click="addMember">Ajouter au groupe</button></form>
           <div class="panel nested assignment-form">

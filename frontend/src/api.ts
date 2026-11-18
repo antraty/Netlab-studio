@@ -177,6 +177,7 @@ export const api = {
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST', body: '{}' }),
   changePassword: (current_password: string, new_password: string) => request<{ ok: boolean; reauthentication_required: boolean }>('/api/auth/password', { method: 'POST', body: JSON.stringify({ current_password, new_password }) }),
   createStudent: (payload: { email: string; display_name: string; password: string }) => request<{ user: User }>('/api/education/users', { method: 'POST', body: JSON.stringify(payload) }),
+  createTeacher: (payload: { email: string; display_name: string; password: string }) => request<{ user: User }>('/api/education/teachers', { method: 'POST', body: JSON.stringify(payload) }),
   users: () => request<{ users: User[] }>('/api/education/users'),
   groups: () => request<{ groups: Group[] }>('/api/education/groups'),
   createGroup: (name: string) => request<{ group: Group }>('/api/education/groups', { method: 'POST', body: JSON.stringify({ name }) }),

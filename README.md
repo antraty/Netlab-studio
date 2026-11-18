@@ -278,7 +278,15 @@ npm install
 npm run dev
 ```
 
-Ouvrir ensuite `http://127.0.0.1:5173`. La page de configuration demande le jeton et crée le premier enseignant ; l’application ne propose pas d’inscription publique. Conserver ce jeton hors du dépôt et de l’historique shell, puis le supprimer de l’environnement après la création du compte. Les comptes étudiants sont créés par un enseignant avec un mot de passe initial, à transmettre séparément. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
+Ouvrir ensuite `http://127.0.0.1:5173`. La page de configuration demande le jeton et crée le premier enseignant ; l’application ne propose pas d’inscription publique. Conserver ce jeton hors du dépôt et de l’historique shell, puis le supprimer de l’environnement après la création du compte. Une fois connecté, un enseignant peut créer d’autres comptes enseignants et étudiants depuis **Partage pédagogique**. Pour partager un laboratoire avec un autre enseignant, utilisez **Partager** et choisissez `editor` ou `viewer` ; les comptes enseignants peuvent aussi créer leurs propres laboratoires et groupes.
+
+Si le premier compte ou ses identifiants sont perdus, ne supprimez pas la base et ne réinitialisez pas tout le projet. Depuis la machine qui héberge les données, arrêtez l’API et sauvegardez la base (copie du fichier SQLite ou sauvegarde PostgreSQL). Configurez le même `NETLAB_DATA_DIR` / `NETLAB_EDUCATION_DB` (ou `NETLAB_DATABASE_URL`) que le service puis créez un nouveau compte enseignant local :
+
+```bash
+.venv/bin/python -m backend.app.admin create-teacher
+```
+
+La commande demande un nouveau courriel, nom et mot de passe (sans afficher celui-ci), puis exige la confirmation `CREER` ; elle ajoute un compte et conserve les données existantes. Pour PostgreSQL, exportez `NETLAB_DATABASE_URL` avant de lancer la commande. Après cela, reconnectez-vous avec les nouveaux identifiants. L’API FastAPI est disponible sur `http://127.0.0.1:8000`, avec sa documentation OpenAPI sur `/docs` et son contrôle de santé sur `/health`.
 
 La migration FastAPI/Vue est maintenant la base active du projet. Le terminal WebSocket et la persistance versionnée locale sont disponibles en prototype. L’étape 6 ajoute la séparation entre le plan de contrôle et le worker Docker : lorsque `NETLAB_WORKER_URL` est défini, FastAPI envoie des jobs HTTP authentifiés au worker au lieu d’accéder au moteur Docker localement. Les fichiers `.netlab-data/` décrivent la définition souhaitée des laboratoires ; l’état temporaire des conteneurs reste géré par le worker.
 
