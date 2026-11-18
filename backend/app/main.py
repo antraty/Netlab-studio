@@ -6,12 +6,14 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import netlab
 from orchestrator import DockerOrchestrator, Orchestrator, RemoteWorkerOrchestrator
 
+from .education import authenticate_websocket, require_teacher, router as education_router
 from .models import CloneRequest, TerminalRequest, Topology, TopologyEnvelope, VersionInfo, VersionsResponse
 from .storage import StorageError, TopologyStore
 from .terminal import TerminalSession
@@ -74,8 +76,27 @@ class ControlPlane:
 
 
 control = ControlPlane(Path(os.getenv("NETLAB_TOPOLOGY", DEFAULT_TOPOLOGY)))
-app = FastAPI(title="Netlab Studio Control API", version="0.4.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="Netlab Studio Control API", version="0.5.0")
+allowed_origins = [origin.strip() for origin in os.getenv(
+    "NETLAB_ALLOWED_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000",
+).split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Netlab-CSRF"],
+)
+app.include_router(education_router, prefix="/api")
+
+
+@app.middleware("http")
+async def validate_browser_origin(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin not in allowed_origins:
+        return JSONResponse(status_code=403, content={"detail": "origin is not allowed"})
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -83,12 +104,12 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "netlab-control-api"}
 
 
-@app.get("/api/topology", response_model=TopologyEnvelope)
+@app.get("/api/topology", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])
 def get_topology() -> dict[str, Topology]:
     return {"topology": control.topology}
 
 
-@app.post("/api/topology", response_model=TopologyEnvelope)
+@app.post("/api/topology", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])
 def save_topology(envelope: TopologyEnvelope) -> dict[str, Topology]:
     try:
         control.save(envelope.topology)
@@ -97,7 +118,7 @@ def save_topology(envelope: TopologyEnvelope) -> dict[str, Topology]:
     return {"topology": control.topology}
 
 
-@app.get("/api/laboratories/{lab}/versions", response_model=VersionsResponse)
+@app.get("/api/laboratories/{lab}/versions", response_model=VersionsResponse, dependencies=[Depends(require_teacher)])
 def list_versions(lab: str) -> VersionsResponse:
     try:
         return VersionsResponse(lab=lab, versions=control.store.list_versions(lab))
@@ -105,7 +126,7 @@ def list_versions(lab: str) -> VersionsResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/laboratories/{lab}/restore/{version}", response_model=TopologyEnvelope)
+@app.post("/api/laboratories/{lab}/restore/{version}", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])
 def restore_version(lab: str, version: int) -> dict[str, Topology]:
     if lab != control.topology.lab:
         raise HTTPException(status_code=404, detail="laboratory is not active")
@@ -116,7 +137,7 @@ def restore_version(lab: str, version: int) -> dict[str, Topology]:
     return {"topology": control.topology}
 
 
-@app.post("/api/laboratories/{lab}/clone", response_model=TopologyEnvelope)
+@app.post("/api/laboratories/{lab}/clone", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])
 def clone_laboratory(lab: str, request: CloneRequest) -> dict[str, Topology]:
     if lab != control.topology.lab:
         raise HTTPException(status_code=404, detail="laboratory is not active")
@@ -127,7 +148,7 @@ def clone_laboratory(lab: str, request: CloneRequest) -> dict[str, Topology]:
     return {"topology": topology}
 
 
-@app.get("/api/laboratories/{lab}/export")
+@app.get("/api/laboratories/{lab}/export", dependencies=[Depends(require_teacher)])
 def export_laboratory(lab: str) -> dict[str, object]:
     try:
         return control.store.export(lab)
@@ -135,7 +156,7 @@ def export_laboratory(lab: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/laboratories/import", response_model=TopologyEnvelope)
+@app.post("/api/laboratories/import", response_model=TopologyEnvelope, dependencies=[Depends(require_teacher)])
 def import_laboratory(envelope: TopologyEnvelope) -> dict[str, Topology]:
     try:
         control.save(envelope.topology)
@@ -144,17 +165,17 @@ def import_laboratory(envelope: TopologyEnvelope) -> dict[str, Topology]:
     return {"topology": control.topology}
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(require_teacher)])
 def get_status() -> dict[str, list[dict[str, str]]]:
     return {"nodes": control.orchestrator.status()}
 
 
-@app.get("/api/logs")
+@app.get("/api/logs", dependencies=[Depends(require_teacher)])
 def get_logs() -> dict[str, list[str]]:
     return {"logs": control.events}
 
 
-@app.post("/api/{action}")
+@app.post("/api/{action}", dependencies=[Depends(require_teacher)])
 def run_action(action: str) -> dict[str, object]:
     if action not in {"up", "down", "verify"}:
         raise HTTPException(status_code=404, detail="unknown action")
@@ -163,7 +184,7 @@ def run_action(action: str) -> dict[str, object]:
     return {"ok": result.ok, "action": action, "exit_code": result.exit_code, "logs": control.events}
 
 
-@app.post("/api/nodes/{node_name}/terminal")
+@app.post("/api/nodes/{node_name}/terminal", dependencies=[Depends(require_teacher)])
 def run_terminal(node_name: str, request: TerminalRequest) -> dict[str, object]:
     try:
         result = control.orchestrator.terminal(node_name, request.command)
@@ -175,6 +196,17 @@ def run_terminal(node_name: str, request: TerminalRequest) -> dict[str, object]:
 
 @app.websocket("/ws/nodes/{node_name}/terminal")
 async def terminal_socket(websocket: WebSocket, node_name: str) -> None:
+    origin = websocket.headers.get("origin")
+    if origin and origin not in allowed_origins:
+        await websocket.close(code=1008, reason="origin is not allowed")
+        return
+    user = authenticate_websocket(websocket.cookies.get("netlab_session"))
+    if not user:
+        await websocket.close(code=1008, reason="authentication required")
+        return
+    if user["role"] != "teacher":
+        await websocket.close(code=1008, reason="teacher role required")
+        return
     await websocket.accept()
     session: TerminalSession | None = None
     try:

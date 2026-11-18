@@ -10,7 +10,16 @@
 - [x] Remplacer l’interface legacy après validation et supprimer l’ancien serveur/interface.
 - [x] Ajouter un WebSocket pour le terminal, les sorties et la fermeture de session.
 - [x] Ajouter les versions locales, restauration, clonage et export/import JSON.
-- [ ] Migrer la persistance vers PostgreSQL lorsque plusieurs utilisateurs seront supportés.
-- [ ] Ajouter utilisateurs, rôles et laboratoires cloud.
-- [x] Séparer FastAPI du worker Docker avec un contrat de jobs et un token de développement.
-- [ ] Ajouter une file de tâches, des identités de workers, des quotas et mTLS.
+- [x] Ajouter des comptes enseignants/étudiants locaux avec hachage de mot de passe et sessions HttpOnly.
+- [x] Protéger les mutations par CSRF et les endpoints d’exécution par rôle enseignant.
+- [x] Ajouter groupes, membres étudiants, instantanés de laboratoires, copies JSON personnelles et suivi des remises.
+- [x] Empêcher le worker Docker d’accepter des jobs lorsqu’aucun jeton n’est configuré.
+- [ ] Ajouter invitations sûres, récupération/réinitialisation de mot de passe et limitation des tentatives.
+- [ ] Ajouter rôles administrateur/enseignant/étudiant plus granulaires, groupes de travail et permissions par laboratoire.
+- [ ] Construire l’édition visuelle des copies étudiantes et des modèles de TP prêts à l’emploi.
+- [ ] Isoler l’exécution Docker et les ressources par étudiant/laboratoire avant toute exécution partagée.
+- [ ] Migrer la persistance vers PostgreSQL lorsque plusieurs utilisateurs/cloud seront supportés.
+- [ ] Ajouter la file de tâches, les identités de workers, les quotas, mTLS et l’observabilité.
+- [ ] Convertir les liens visuels de topologie en vrais réseaux/interfaces Docker isolés.
+- [ ] Corriger le scénario de démonstration afin que les images disposent de `ping` (ou choisir un test disponible et le documenter).
+- [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.

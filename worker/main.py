@@ -7,11 +7,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from orchestrator import DockerOrchestrator
 from .contracts import WorkerJob, WorkerResult
 
-TOKEN = os.getenv("NETLAB_WORKER_TOKEN", "local-development-token")
+TOKEN = os.getenv("NETLAB_WORKER_TOKEN", "")
 app = FastAPI(title="Netlab Studio Docker Worker", version="0.1.0")
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
+    if not TOKEN:
+        raise HTTPException(status_code=503, detail="worker authentication is not configured")
     if authorization != f"Bearer {TOKEN}":
         raise HTTPException(status_code=401, detail="invalid worker token")
 
