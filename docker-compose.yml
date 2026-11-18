@@ -31,8 +31,14 @@ services:
       NETLAB_WORKER_CONTAINER: "true"
       NETLAB_WORKER_HOST: 0.0.0.0
       NETLAB_WORKER_PORT: 9000
+      NETLAB_DATABASE_URL: postgresql://${POSTGRES_USER:-netlab}:${POSTGRES_PASSWORD:-netlab-development-only}@db:5432/${POSTGRES_DB:-netlab}?sslmode=disable
+      NETLAB_WORKER_ID: ${NETLAB_WORKER_ID:-docker-worker-1}
+      NETLAB_WORKER_NAME: ${NETLAB_WORKER_NAME:-Docker worker 1}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db:
+        condition: service_healthy
     expose: ["9000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2)"]

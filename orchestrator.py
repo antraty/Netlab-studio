@@ -1,16 +1,14 @@
-"""Execution-plane adapters for Netlab Studio.
-
-The control plane talks to this small interface instead of calling Docker
-commands directly. Docker is the first adapter; a VM or remote worker can be
-added without changing the HTTP API.
-"""
+"""Execution-plane adapters for Netlab Studio."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
+import ssl
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -37,8 +35,6 @@ class Orchestrator(Protocol):
 
 
 class DockerOrchestrator:
-    """Execute one validated topology through the local Docker CLI."""
-
     ALLOWED_TERMINAL_COMMANDS = {"hostname", "uname", "ip", "ping"}
 
     def __init__(self, topology: dict[str, Any]) -> None:
@@ -53,18 +49,15 @@ class DockerOrchestrator:
         return ActionResult(exit_code == 0, name, exit_code)
 
     def status(self) -> list[dict[str, str]]:
-        result = netlab.docker("ps", "-a", "--format", "{{.Names}}\\t{{.Status}}", capture=True)
+        result = netlab.docker("ps", "-a", "--format", "{{.Names}}\t{{.Status}}", capture=True)
         if result.returncode:
             state = "docker-unavailable" if result.returncode == 127 else "docker-error"
             return [{"name": node["name"], "state": state} for node in self.topology["nodes"]]
         rows = dict(line.split("\t", 1) for line in result.stdout.splitlines() if "\t" in line)
-        return [
-            {
-                "name": node["name"],
-                "state": rows.get(netlab.resource_name(self.topology, node["name"]), "stopped"),
-            }
-            for node in self.topology["nodes"]
-        ]
+        return [{
+            "name": node["name"],
+            "state": rows.get(netlab.resource_name(self.topology, node["name"]), "stopped"),
+        } for node in self.topology["nodes"]]
 
     def terminal(self, node_name: str, command: list[str]) -> ActionResult:
         self._validate_terminal_command(command)
@@ -134,12 +127,10 @@ class DockerOrchestrator:
                     value = int(arguments[index + 1])
                 except ValueError as exc:
                     raise ValueError("ping count and timeout must be integers") from exc
-                if item == "-c":
-                    if not 1 <= value <= 3:
-                        raise ValueError("ping count must be between 1 and 3")
-                else:
-                    if not 1 <= value <= 3:
-                        raise ValueError("ping timeout must be between 1 and 3 seconds")
+                if item == "-c" and not 1 <= value <= 3:
+                    raise ValueError("ping count must be between 1 and 3")
+                if item == "-W" and not 1 <= value <= 3:
+                    raise ValueError("ping timeout must be between 1 and 3 seconds")
                 index += 2
                 continue
             if destination is not None or item.startswith("-"):
@@ -181,6 +172,7 @@ class RemoteWorkerOrchestrator:
         self.timeout = timeout
 
     def _request(self, action: str, node_name: str | None = None, command: list[str] | None = None) -> dict[str, Any]:
+        started = time.monotonic()
         payload = {
             "job_id": str(uuid.uuid4()),
             "action": action,
@@ -191,17 +183,41 @@ class RemoteWorkerOrchestrator:
         request = urllib.request.Request(
             f"{self.base_url}/v1/jobs",
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.token}",
+                "X-Netlab-Worker-ID": os.getenv("NETLAB_WORKER_ID", "control-plane"),
+            },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode())
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")
-            raise RuntimeError(f"worker returned HTTP {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"worker unavailable: {exc.reason}") from exc
+        ca_file = os.getenv("NETLAB_MTLS_CA_FILE", "")
+        cert_file = os.getenv("NETLAB_MTLS_CERT_FILE", "")
+        key_file = os.getenv("NETLAB_MTLS_KEY_FILE", "")
+        if self.base_url.startswith("https://") and any((ca_file, cert_file, key_file)):
+            if not all((ca_file, cert_file, key_file)):
+                raise RuntimeError("mTLS requires NETLAB_MTLS_CA_FILE, NETLAB_MTLS_CERT_FILE and NETLAB_MTLS_KEY_FILE")
+            ssl_context = ssl.create_default_context(cafile=ca_file)
+            ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context))
+        else:
+            opener = urllib.request.build_opener()
+
+        max_attempts = max(1, min(10, int(os.getenv("NETLAB_WORKER_MAX_ATTEMPTS", "3"))))
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with opener.open(request, timeout=self.timeout) as response:
+                    result = json.loads(response.read().decode())
+                    result.setdefault("duration_ms", int((time.monotonic() - started) * 1000))
+                    return result
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode(errors="replace")
+                raise RuntimeError(f"worker returned HTTP {exc.code}: {detail}") from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                last_error = exc
+                if attempt < max_attempts:
+                    time.sleep(min(5, 2 ** (attempt - 1)))
+        raise RuntimeError(f"worker unavailable after {max_attempts} attempts: {getattr(last_error, 'reason', last_error)}")
 
     def action(self, name: str) -> ActionResult:
         result = self._request(name)

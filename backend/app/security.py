@@ -69,6 +69,16 @@ def validate_production_settings() -> None:
         errors.append("NETLAB_WORKER_URL must use HTTPS")
     if not strong_secret(os.getenv("NETLAB_WORKER_TOKEN", "")):
         errors.append("NETLAB_WORKER_TOKEN must be a high-entropy secret of at least 32 characters")
+    mtls_files = [
+        os.getenv("NETLAB_MTLS_CA_FILE", ""),
+        os.getenv("NETLAB_MTLS_CERT_FILE", ""),
+        os.getenv("NETLAB_MTLS_KEY_FILE", ""),
+    ]
+    if any(mtls_files) and not all(mtls_files):
+        errors.append("mTLS requires NETLAB_MTLS_CA_FILE, NETLAB_MTLS_CERT_FILE and NETLAB_MTLS_KEY_FILE")
+    if all(mtls_files):
+        if not all(os.path.isfile(path) for path in mtls_files):
+            errors.append("configured mTLS certificate and key files must exist")
     if not configured_images():
         errors.append("NETLAB_ALLOWED_IMAGES must list pre-approved container images")
     bootstrap_token = os.getenv("NETLAB_BOOTSTRAP_TOKEN", "")
@@ -99,6 +109,16 @@ def validate_worker_settings() -> None:
         errors.append("NETLAB_WORKER_TOKEN must be a high-entropy secret of at least 32 characters")
     if not configured_images():
         errors.append("NETLAB_ALLOWED_IMAGES must list pre-approved container images")
+    server_mtls = [
+        os.getenv("NETLAB_MTLS_SERVER_CERT_FILE", ""),
+        os.getenv("NETLAB_MTLS_SERVER_KEY_FILE", ""),
+        os.getenv("NETLAB_MTLS_SERVER_CA_FILE", ""),
+    ]
+    if any(server_mtls) and not all(server_mtls):
+        errors.append(
+            "mTLS server requires NETLAB_MTLS_SERVER_CERT_FILE, "
+            "NETLAB_MTLS_SERVER_KEY_FILE and NETLAB_MTLS_SERVER_CA_FILE",
+        )
     host = os.getenv("NETLAB_WORKER_HOST", "")
     try:
         address = ipaddress.ip_address(host)

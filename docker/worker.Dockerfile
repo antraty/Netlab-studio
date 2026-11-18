@@ -14,4 +14,4 @@ COPY worker ./worker
 COPY orchestrator.py netlab.py pyproject.toml ./
 
 EXPOSE 9000
-CMD ["python3", "-m", "uvicorn", "worker.main:app", "--host", "0.0.0.0", "--port", "9000"]
+CMD ["python3", "-m", "worker.server"]

@@ -438,6 +438,82 @@ class EducationApiTests(unittest.TestCase):
         self.assertEqual(runtime.json()["status"], "stopped")
         student.close()
 
+    def test_worker_queue_metrics_alerts_and_recovery(self):
+        self.client.post("/api/auth/bootstrap", json={
+            "bootstrap_token": "test-setup-secret",
+            "email": "teacher@example.test",
+            "display_name": "Teacher",
+            "password": "teacher-password-123",
+        })
+        headers = self.csrf_headers(self.client)
+        topology = load_topology(Path(__file__).parent / "topology.json")
+
+        registered = self.client.post(
+            "/api/execution/workers/register",
+            headers=headers,
+            json={
+                "worker_id": "worker-a",
+                "worker_name": "Docker Worker A",
+                "capabilities": ["docker"],
+            },
+        )
+        self.assertEqual(registered.status_code, 200, registered.text)
+
+        heartbeat = self.client.post(
+            "/api/execution/workers/worker-a/heartbeat",
+            headers=headers,
+            json={},
+        )
+        self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+
+        queued = self.client.post(
+            "/api/execution/jobs",
+            headers=headers,
+            json={"action": "status", "topology": topology, "max_attempts": 3},
+        )
+        self.assertEqual(queued.status_code, 201, queued.text)
+        job_id = queued.json()["job"]["id"]
+
+        claimed = education.store.claim_job("worker-a")
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["id"], job_id)
+        completed = education.store.complete_job(
+            job_id,
+            "worker-a",
+            True,
+            0,
+            "",
+            nodes=[{"name": "client", "state": "stopped"}],
+        )
+        self.assertEqual(completed["status"], "completed")
+
+        metrics = education.store.execution_metrics(10)
+        self.assertEqual(len(metrics), 1)
+        self.assertTrue(metrics[0]["ok"])
+        self.assertEqual(education.store.workers()[0]["id"], "worker-a")
+
+        failed = education.store.enqueue_job(topology, "up", max_attempts=2)
+        claimed_failed = education.store.claim_job("worker-a")
+        self.assertEqual(claimed_failed["id"], failed["id"])
+        retried = education.store.complete_job(
+            failed["id"], "worker-a", False, 1, "temporary failure",
+        )
+        self.assertEqual(retried["status"], "queued")
+        with education.store._connect() as db:
+            db.execute(
+                "UPDATE worker_jobs SET available_at=? WHERE id=?",
+                (0, failed["id"]),
+            )
+        retried_claim = education.store.claim_job("worker-a")
+        self.assertEqual(retried_claim["id"], failed["id"])
+        dead = education.store.complete_job(
+            failed["id"], "worker-a", False, 1, "permanent failure",
+        )
+        self.assertEqual(dead["status"], "dead")
+
+        alerts = education.store.alerts(10)
+        self.assertTrue(any(alert["source"] == "worker:worker-a" for alert in alerts))
+
     def test_private_api_requires_login_and_csrf(self):
         response = self.client.get("/api/topology")
         self.assertEqual(response.status_code, 401)

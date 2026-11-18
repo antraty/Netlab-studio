@@ -236,6 +236,60 @@ class EducationStore:
                     expires_at DOUBLE PRECISION NOT NULL,
                     used_at DOUBLE PRECISION
                 );
+                CREATE TABLE IF NOT EXISTS remote_workers (
+                    id TEXT PRIMARY KEY,
+                    worker_name TEXT NOT NULL,
+                    last_heartbeat DOUBLE PRECISION NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('online','offline','degraded')),
+                    capabilities TEXT NOT NULL DEFAULT '[]',
+                    updated_at DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS worker_jobs (
+                    id TEXT PRIMARY KEY,
+                    worker_id TEXT,
+                    action TEXT NOT NULL,
+                    topology_json TEXT NOT NULL,
+                    node_name TEXT,
+                    command_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL CHECK (status IN ('queued','leased','running','completed','failed','dead')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL DEFAULT 3,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at DOUBLE PRECISION NOT NULL,
+                    updated_at DOUBLE PRECISION NOT NULL,
+                    available_at DOUBLE PRECISION NOT NULL,
+                    started_at DOUBLE PRECISION,
+                    completed_at DOUBLE PRECISION
+                );
+                CREATE TABLE IF NOT EXISTS execution_metrics (
+                    id TEXT PRIMARY KEY,
+                    worker_id TEXT,
+                    job_id TEXT,
+                    action TEXT NOT NULL,
+                    ok INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    exit_code INTEGER,
+                    recorded_at DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS alert_notifications (
+                    id TEXT PRIMARY KEY,
+                    severity TEXT NOT NULL CHECK (severity IN ('warning','error','critical')),
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    acknowledged INTEGER NOT NULL DEFAULT 0,
+                    created_at DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cleanup_attempts (
+                    id TEXT PRIMARY KEY,
+                    laboratory_id TEXT NOT NULL,
+                    student_assignment_id TEXT,
+                    student_user_id TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('pending','succeeded','failed')),
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    last_error TEXT,
+                    created_at DOUBLE PRECISION NOT NULL,
+                    updated_at DOUBLE PRECISION NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS groups (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -662,6 +716,274 @@ class EducationStore:
         with self._connect() as db:
             for key in keys:
                 db.execute("DELETE FROM auth_login_attempts WHERE key_hash=?", (_token_hash(key),))
+
+    def register_worker(
+        self,
+        worker_id: str,
+        worker_name: str,
+        capabilities: list[str] | None = None,
+    ) -> dict[str, Any]:
+        worker_id = worker_id.strip()
+        worker_name = worker_name.strip()
+        if not re.fullmatch(r"[a-zA-Z0-9._-]{1,128}", worker_id):
+            raise EducationError("worker id is invalid")
+        if not worker_name or len(worker_name) > 128:
+            raise EducationError("worker name must contain 1 to 128 characters")
+        now = time.time()
+        capabilities_json = json.dumps(sorted(set(capabilities or ["docker"])), separators=(",", ":"))
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO remote_workers(id,worker_name,last_heartbeat,status,capabilities,updated_at) "
+                "VALUES(?, ?, ?, 'online', ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET worker_name=excluded.worker_name,"
+                "last_heartbeat=excluded.last_heartbeat,status='online',"
+                "capabilities=excluded.capabilities,updated_at=excluded.updated_at",
+                (worker_id, worker_name, now, capabilities_json, now),
+            )
+        return self.worker(worker_id)
+
+    def worker(self, worker_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id,worker_name,last_heartbeat,status,capabilities,updated_at "
+                "FROM remote_workers WHERE id=?",
+                (worker_id,),
+            ).fetchone()
+        if not row:
+            raise EducationError("worker not found")
+        result = dict(row)
+        result["capabilities"] = json.loads(result["capabilities"])
+        return result
+
+    def workers(self) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                "UPDATE remote_workers SET status='offline' "
+                "WHERE last_heartbeat<? AND status!='offline'",
+                (now - 90,),
+            )
+            rows = db.execute(
+                "SELECT id,worker_name,last_heartbeat,status,capabilities,updated_at "
+                "FROM remote_workers ORDER BY worker_name,last_heartbeat DESC",
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["capabilities"] = json.loads(item["capabilities"])
+                result.append(item)
+            return result
+
+    def enqueue_job(
+        self,
+        topology: dict[str, Any],
+        action: str,
+        node_name: str | None = None,
+        command: list[str] | None = None,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        if action not in {"up", "down", "verify", "status", "terminal", "observability"}:
+            raise EducationError("unsupported worker action")
+        if max_attempts not in range(1, 11):
+            raise EducationError("max attempts must be between 1 and 10")
+        job_id = str(uuid.uuid4())
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO worker_jobs("
+                "id,worker_id,action,topology_json,node_name,command_json,status,attempts,max_attempts,"
+                "result_json,created_at,updated_at,available_at,started_at,completed_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    job_id, None, action, json.dumps(topology, separators=(",", ":"), ensure_ascii=False),
+                    node_name, json.dumps(command or [], separators=(",", ":")), "queued", 0,
+                    max_attempts, "{}", now, now, now, None, None,
+                ),
+            )
+        return self.job(job_id)
+
+    def claim_job(self, worker_id: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self._connect() as db:
+            if db.postgres:
+                db.execute("SELECT id FROM remote_workers WHERE id=? FOR UPDATE", (worker_id,))
+            else:
+                db.execute("BEGIN IMMEDIATE")
+            worker = db.execute("SELECT id FROM remote_workers WHERE id=?", (worker_id,)).fetchone()
+            if not worker:
+                raise EducationError("worker is not registered")
+            row = db.execute(
+                "SELECT * FROM worker_jobs WHERE status='queued' AND available_at<=?"
+                " ORDER BY created_at LIMIT 1",
+                (now,),
+            ).fetchone()
+            if not row:
+                return None
+            job_id = row["id"]
+            db.execute(
+                "UPDATE remote_workers SET last_heartbeat=?,status='online',updated_at=? WHERE id=?",
+                (now, now, worker_id),
+            )
+            db.execute(
+                "UPDATE worker_jobs SET status='running',worker_id=?,attempts=attempts+1,"
+                "started_at=?,updated_at=? WHERE id=?",
+                (worker_id, now, now, job_id),
+            )
+            claimed = db.execute("SELECT * FROM worker_jobs WHERE id=?", (job_id,)).fetchone()
+            return self._job_result(claimed)
+
+    def complete_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        ok: bool,
+        exit_code: int,
+        output: str,
+        nodes: list[dict[str, str]] | None = None,
+        observability: dict[str, Any] | None = None,
+        duration_ms: int = 0,
+    ) -> dict[str, Any]:
+        now = time.time()
+        result_payload = {
+            "ok": bool(ok),
+            "exit_code": int(exit_code),
+            "output": output[-65536:],
+            "nodes": nodes or [],
+            "observability": observability,
+        }
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT attempts,status,worker_id,max_attempts FROM worker_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                raise EducationError("job not found")
+            if row["worker_id"] != worker_id:
+                raise EducationError("job is leased by another worker")
+            status = "completed" if ok else "failed"
+            if not ok and int(row["attempts"]) < int(row["max_attempts"]):
+                status = "queued"
+                delay = min(30, 2 ** max(0, int(row["attempts"]) - 1))
+                db.execute(
+                    "UPDATE worker_jobs SET status=?,worker_id=NULL,result_json=?,updated_at=?,"
+                    "available_at=?,started_at=NULL,completed_at=NULL WHERE id=?",
+                    (status, json.dumps(result_payload), now, now + delay, job_id),
+                )
+            else:
+                if not ok:
+                    status = "dead"
+                db.execute(
+                    "UPDATE worker_jobs SET status=?,result_json=?,updated_at=?,completed_at=? WHERE id=?",
+                    (status, json.dumps(result_payload), now, now, job_id),
+                )
+            action_row = db.execute("SELECT action FROM worker_jobs WHERE id=?", (job_id,)).fetchone()
+            db.execute(
+                "INSERT INTO execution_metrics(id,worker_id,job_id,action,ok,duration_ms,exit_code,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid.uuid4()), worker_id, job_id, action_row["action"], int(bool(ok)),
+                    max(0, int(duration_ms)), int(exit_code), now,
+                ),
+            )
+        if not ok:
+            self.record_alert(
+                "error",
+                f"worker:{worker_id}",
+                f"Job {job_id} failed: {output[-500:] or f'exit {exit_code}'}",
+            )
+        return self.job(job_id)
+
+    def requeue_expired_jobs(self, lease_seconds: int = 300) -> int:
+        cutoff = time.time() - lease_seconds
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE worker_jobs SET status='queued',worker_id=NULL,started_at=NULL,updated_at=? "
+                "WHERE status='running' AND started_at<?",
+                (time.time(), cutoff),
+            )
+            return max(0, int(result.rowcount))
+
+    def job(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM worker_jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            raise EducationError("job not found")
+        return self._job_result(row)
+
+    @staticmethod
+    def _job_result(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["topology"] = json.loads(result.pop("topology_json"))
+        result["command"] = json.loads(result.pop("command_json"))
+        result["result"] = json.loads(result.pop("result_json"))
+        return result
+
+    def execution_metrics(self, limit: int = 500) -> list[dict[str, Any]]:
+        limit = min(max(1, limit), 5000)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id,worker_id,job_id,action,ok,duration_ms,exit_code,recorded_at "
+                "FROM execution_metrics ORDER BY recorded_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def record_alert(self, severity: str, source: str, message: str) -> dict[str, Any]:
+        if severity not in {"warning", "error", "critical"}:
+            raise EducationError("invalid alert severity")
+        alert_id = str(uuid.uuid4())
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO alert_notifications(id,severity,source,message,acknowledged,created_at) "
+                "VALUES(?,?,?,?,0,?)",
+                (alert_id, severity, source[:128], message[:5000], now),
+            )
+        return {"id": alert_id, "severity": severity, "source": source, "message": message, "acknowledged": False, "created_at": now}
+
+    def alerts(self, limit: int = 500) -> list[dict[str, Any]]:
+        limit = min(max(1, limit), 5000)
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id,severity,source,message,acknowledged,created_at "
+                "FROM alert_notifications ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def record_cleanup_attempt(
+        self,
+        laboratory_id: str,
+        succeeded: bool,
+        error: str | None = None,
+        student_assignment_id: str | None = None,
+        student_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        now = time.time()
+        cleanup_id = str(uuid.uuid4())
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO cleanup_attempts("
+                "id,laboratory_id,student_assignment_id,student_user_id,status,attempt_count,last_error,"
+                "created_at,updated_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    cleanup_id, laboratory_id, student_assignment_id, student_user_id,
+                    "succeeded" if succeeded else "failed", 1,
+                    (error or "")[:5000] or None, now, now,
+                ),
+            )
+        if not succeeded:
+            self.record_alert(
+                "error",
+                "cleanup",
+                f"Laboratory cleanup failed for {laboratory_id}: {(error or 'unknown error')[:500]}",
+            )
+        return {
+            "id": cleanup_id,
+            "laboratory_id": laboratory_id,
+            "status": "succeeded" if succeeded else "failed",
+        }
 
     def change_password(self, user_id: str, old_password: str, new_password: str) -> None:
         new_password = _password(new_password)
@@ -1811,6 +2133,20 @@ class SubmissionFeedbackRequest(BaseModel):
     grade: float | None = Field(default=None, ge=0, le=100)
 
 
+class WorkerRegistrationRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
+    worker_name: str = Field(min_length=1, max_length=128)
+    capabilities: list[str] = Field(default_factory=lambda: ["docker"], max_length=32)
+
+
+class WorkerJobRequest(BaseModel):
+    action: str
+    topology: dict[str, Any]
+    node_name: str | None = None
+    command: list[str] = Field(default_factory=list, max_length=64)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+
 def require_user(request: Request) -> dict[str, str]:
     user = store.session_user(request.cookies.get(SESSION_COOKIE))
     if not user:
@@ -1896,6 +2232,81 @@ def reset_password(request: ResetPasswordRequest) -> dict[str, bool]:
     except EducationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
+
+
+@router.post("/execution/workers/register")
+def register_remote_worker(
+    request: WorkerRegistrationRequest,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        worker = store.register_worker(request.worker_id, request.worker_name, request.capabilities)
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"worker": worker}
+
+
+@router.post("/execution/workers/{worker_id}/heartbeat")
+def remote_worker_heartbeat(
+    worker_id: str,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        return {"worker": store.register_worker(worker_id, worker_id)}
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/execution/workers")
+def list_remote_workers(
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    return {"workers": store.workers()}
+
+
+@router.post("/execution/jobs", status_code=201)
+def enqueue_worker_job(
+    request: WorkerJobRequest,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        job = store.enqueue_job(
+            request.topology,
+            request.action,
+            request.node_name,
+            request.command,
+            request.max_attempts,
+        )
+    except (EducationError, netlab.TopologyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"job": job}
+
+
+@router.get("/execution/jobs/{job_id}")
+def get_worker_job(
+    job_id: str,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        return {"job": store.job(job_id)}
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/execution/metrics")
+def get_execution_metrics(
+    limit: int = 500,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    return {"metrics": store.execution_metrics(limit)}
+
+
+@router.get("/execution/alerts")
+def get_execution_alerts(
+    limit: int = 500,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    return {"alerts": store.alerts(limit)}
 
 
 @router.post("/auth/login")

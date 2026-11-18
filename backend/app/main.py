@@ -116,21 +116,51 @@ def expire_laboratories() -> None:
             if is_student_laboratory
             else education_module.store.set_laboratory_status(laboratory["id"], status)
         )
-        try:
-            result = build_orchestrator(laboratory["topology"]).action("down")
-        except (RuntimeError, ValueError) as exc:
-            set_status("failed")
-            logger.error("Could not expire laboratory %s: %s", laboratory.get("id", laboratory.get("assignment_id")), exc)
-            continue
-        if result.ok:
+        laboratory_id = laboratory.get("id") or laboratory.get("assignment_id") or "unknown"
+        last_error: Exception | None = None
+        result = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = build_orchestrator(laboratory["topology"]).action("down")
+                if result.ok:
+                    break
+                last_error = RuntimeError(f"cleanup worker exit code {result.exit_code}")
+            except (RuntimeError, ValueError) as exc:
+                last_error = exc
+            if attempt < max_attempts:
+                time.sleep(min(5, 2 ** (attempt - 1)))
+        if result is not None and result.ok:
             set_status("expired")
+            education_module.store.record_cleanup_attempt(
+                laboratory_id,
+                True,
+                student_assignment_id=laboratory.get("assignment_id") if is_student_laboratory else None,
+                student_user_id=laboratory.get("user_id") if is_student_laboratory else None,
+            )
             if not is_student_laboratory:
                 education_module.store.record_laboratory_event(laboratory["id"], None, "expired: resources cleaned")
         else:
             set_status("failed")
+            education_module.store.record_cleanup_attempt(
+                laboratory_id,
+                False,
+                str(last_error or "cleanup did not complete"),
+                student_assignment_id=laboratory.get("assignment_id") if is_student_laboratory else None,
+                student_user_id=laboratory.get("user_id") if is_student_laboratory else None,
+            )
             if not is_student_laboratory:
-                education_module.store.record_laboratory_event(laboratory["id"], None, f"expired cleanup failed (exit {result.exit_code})")
-            logger.error("Could not clean up expired laboratory %s (exit %s)", laboratory.get("id", laboratory.get("assignment_id")), result.exit_code)
+                education_module.store.record_laboratory_event(
+                    laboratory["id"],
+                    None,
+                    f"expired cleanup failed after {max_attempts} attempts: {last_error}",
+                )
+            logger.error(
+                "Could not clean up expired laboratory %s after %s attempts: %s",
+                laboratory.get("id", laboratory.get("assignment_id")),
+                max_attempts,
+                last_error,
+            )
 
 
 @asynccontextmanager
@@ -579,6 +609,15 @@ def get_observability(user: dict[str, str] = Depends(require_teacher)) -> dict[s
     snapshot["errors"] = []
     snapshot["alerts"] = snapshot.get("alerts", [])
     snapshot["alerts"] = [alert for alert in snapshot["alerts"] if alert.get("lab") in allowed_names]
+    for alert in snapshot["alerts"]:
+        education_module.store.record_alert(
+            alert.get("severity", "warning"),
+            "docker-observability",
+            alert.get("message", "Docker alert"),
+        )
+    snapshot["workers"] = education_module.store.workers()
+    snapshot["execution_metrics"] = education_module.store.execution_metrics(100)
+    snapshot["execution_alerts"] = education_module.store.alerts(100)
     return snapshot
 
 

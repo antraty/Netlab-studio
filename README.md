@@ -367,6 +367,11 @@ L’enseignant peut affecter au groupe la topologie courante ou un modèle LAN/r
 Chaque remise est conservée comme une tentative numérotée avec un instantané immuable de la topologie. L’enseignant peut consulter chaque tentative, lui attribuer une note sur 100 et transmettre un commentaire ; l’étudiant retrouve ses notes, remises et retours dans son espace. Une réinitialisation nettoie le runtime avant de restaurer la topologie de départ sans supprimer l’historique. Les limites CPU/mémoire et la durée de vie restent appliquées ; l’expiration nettoie les runtimes étudiants.
 
 Pour tester : construisez les images listées à la Phase 1, démarrez l’API et le frontend, puis connectez-vous comme enseignant. Créez un groupe avec deux comptes étudiants et affectez un modèle avec consignes et critères. Dans deux sessions navigateur distinctes, chaque étudiant modifie une IP ou une route, déploie et vérifie son TP, arrête le runtime et remet son travail. Depuis le compte enseignant, consultez les instantanés des tentatives et laissez un commentaire ; vérifiez que chacun ne voit que son propre historique et ses retours.
+## Exécution distante et reprise
+
+La tranche 4 persiste les jobs dans PostgreSQL ou SQLite selon la configuration du stockage éducatif. Les travaux sont remis à des workers identifiés, relancés après expiration de leur bail et échoués définitivement après le nombre maximal de tentatives. Les métriques de durée et les alertes sont conservées en base et visibles dans les endpoints `/api/execution/metrics`, `/api/execution/alerts` et `/api/execution/workers`.
+
+Le worker peut utiliser un certificat HTTPS/mTLS côté serveur et le plan de contrôle peut présenter son propre certificat client. Les variables `NETLAB_MTLS_*` sont documentées dans `.env.example` et dans `DEPLOYMENT.md`. La reprise des laboratoires expirés effectue jusqu’à trois tentatives de nettoyage avant de conserver une alerte persistante.
 
 Cette phase est maintenant complète pour le flux pédagogique local. Les opérations du worker distant restent synchrones et la haute disponibilité des workers n’est pas garantie ; le projet ne doit pas être exposé publiquement avant durcissement et revue de sécurité.
 

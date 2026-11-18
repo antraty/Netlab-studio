@@ -22,5 +22,7 @@ class WorkerResult(BaseModel):
     action: str
     exit_code: int = 0
     output: str = ""
+    worker_id: str = ""
+    duration_ms: int = 0
     nodes: list[dict[str, str]] = Field(default_factory=list)
     observability: dict[str, Any] | None = None

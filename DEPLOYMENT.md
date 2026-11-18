@@ -107,3 +107,19 @@ Sans cette variable, le premier compte est enseignant. Les rôles disponibles so
 - aucune remise e-mail n’est effectuée : transmettre le jeton hors du dépôt, par un canal sûr.
 
 Les affectations peuvent inclure des consignes, des critères et un modèle de laboratoire. Chaque remise crée une tentative avec un instantané. La correction peut ajouter un commentaire et une note de 0 à 100. La réinitialisation demandée par l’étudiant arrête d’abord son runtime, puis restaure une copie neuve conforme au modèle sans effacer l’historique des tentatives.
+
+## Exécution distante — Tranche 4
+
+Le plan de contrôle utilise une file persistante PostgreSQL pour les travaux `up`, `down`, `verify`, `status`, `terminal` et `observability`. Les jobs sont placés en location avec un identifiant de worker, jusqu’à trois tentatives par défaut, puis repris après expiration de leur bail.
+
+Chaque worker publie son identifiant, son nom, ses capacités et son heartbeat. Les workers sans heartbeat depuis 90 secondes passent hors ligne. Les durées, codes de sortie et résultats sont conservés dans les métriques d’exécution ; les échecs créent une alerte persistante consultable depuis l’API.
+
+Le worker est exposé uniquement sur le réseau interne Compose. En production :
+
+1. utiliser HTTPS pour `NETLAB_WORKER_URL` ;
+2. fournir les certificats CA, certificat et clé mTLS client ;
+3. fournir les certificats serveur avec `NETLAB_MTLS_SERVER_*` ;
+4. conserver un jeton worker distinct à haute entropie ;
+5. identifier chaque worker avec `NETLAB_WORKER_ID` et `NETLAB_WORKER_NAME`.
+
+Les jobs échoués sont retentés avec un backoff borné. Les leases expirés sont remis automatiquement en file. Les laboratoires expirés sont nettoyés jusqu’à trois fois ; chaque tentative est enregistrée avec son résultat et son erreur.
