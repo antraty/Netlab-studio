@@ -206,7 +206,9 @@ function addNode() {
   const name = window.prompt('Nom du nœud :', `linux-node-${topology.value.nodes.length + 1}`)
   const image = window.prompt('Image Docker :', 'ubuntu:24.04')
   if (!name || !image || topology.value.nodes.some(node => node.name === name)) return
-  topology.value.nodes.push({ name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 } })
+  const node: Node = { name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 } }
+  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
+  topology.value.nodes.push(node)
   selected.value = name; dirty.value = true
 }
 function addCatalogService() {
@@ -231,6 +233,7 @@ function addCatalogService() {
     name, image: profile.image, command: [...profile.command], service_id: profile.id,
     position: { x: 60 + topology.value.nodes.length * 210, y: 110 },
   }
+  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   if (publishedPort !== undefined) node.published_port = publishedPort
   topology.value.nodes.push(node); selected.value = name; dirty.value = true
 }

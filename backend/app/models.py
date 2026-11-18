@@ -16,13 +16,31 @@ class Position(BaseModel):
 class Network(BaseModel):
     name: str
     driver: str = "bridge"
-    subnet: str | None = None
+    subnet: str
 
     @field_validator("name")
     @classmethod
     def valid_name(cls, value: str) -> str:
         netlab.validate_identifier(value, "network.name")
         return value
+
+
+class Interface(BaseModel):
+    name: str
+    network: str
+    ipv4: str | None = None
+    gateway: str | None = None
+
+    @field_validator("name", "network")
+    @classmethod
+    def valid_identifier(cls, value: str) -> str:
+        netlab.validate_identifier(value, "interface field")
+        return value
+
+
+class Route(BaseModel):
+    destination: str
+    via: str
 
 
 class Node(BaseModel):
@@ -32,6 +50,10 @@ class Node(BaseModel):
     position: Position = Field(default_factory=Position)
     service_id: str | None = None
     published_port: int | None = Field(default=None, ge=1, le=65535)
+    type: str = "linux"
+    router: bool = False
+    interfaces: list[Interface] = Field(default_factory=list)
+    routes: list[Route] = Field(default_factory=list)
 
     @field_validator("name", "image")
     @classmethod
@@ -71,21 +93,34 @@ class ConnectivityCheck(BaseModel):
 class Topology(BaseModel):
     version: int = 1
     lab: str
-    network: Network
+    network: Network | None = None
+    networks: list[Network] = Field(default_factory=list)
     nodes: list[Node]
     connectivity_check: ConnectivityCheck
     links: list[Link] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_graph(self) -> "Topology":
-        if self.version != 1:
-            raise ValueError("only topology format version 1 is supported")
+        if self.version not in {1, 2}:
+            raise ValueError("only topology format versions 1 and 2 are supported")
         netlab.validate_identifier(self.lab, "lab")
+        if self.version == 1:
+            if self.network is None:
+                raise ValueError("version 1 requires network")
+            self.networks = [self.network]
+        else:
+            if not self.networks:
+                raise ValueError("version 2 requires networks")
+            if self.network is None:
+                self.network = self.networks[0]
         if len(self.nodes) < 2:
             raise ValueError("nodes must contain at least two nodes")
         names = [node.name for node in self.nodes]
         if len(names) != len(set(names)):
             raise ValueError("node names must be unique")
+        network_names = {network.name for network in self.networks}
+        if len(network_names) != len(self.networks):
+            raise ValueError("network names must be unique")
         known = set(names)
         host_ports: set[int] = set()
         for node in self.nodes:
@@ -94,8 +129,13 @@ class Topology(BaseModel):
                 if node.published_port in host_ports:
                     raise ValueError("published host ports must be unique in a topology")
                 host_ports.add(node.published_port)
-        if self.network.driver != "bridge":
-            raise ValueError("prototype only supports the bridge network driver")
+            if self.version == 2:
+                if not node.interfaces:
+                    raise ValueError(f"node {node.name} requires at least one interface")
+                if any(interface.network not in network_names for interface in node.interfaces):
+                    raise ValueError(f"node {node.name} references an unknown network")
+        if any(network.driver != "bridge" for network in self.networks):
+            raise ValueError("prototype only supports bridge networks")
         if self.connectivity_check.from_node not in known or self.connectivity_check.to_node not in known:
             raise ValueError("connectivity check references an unknown node")
         if self.connectivity_check.from_node == self.connectivity_check.to_node:
@@ -111,7 +151,11 @@ class Topology(BaseModel):
         return self
 
     def to_topology_dict(self) -> dict[str, Any]:
-        return self.model_dump(by_alias=True, exclude_none=True)
+        data = self.model_dump(by_alias=True, exclude_none=True)
+        if self.version == 1:
+            data.pop("networks", None)
+            data.pop("type", None)
+        return data
 
 
 class TopologyEnvelope(BaseModel):
