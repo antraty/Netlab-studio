@@ -30,7 +30,7 @@
 - [ ] Historiser les métriques et définir rétention, agrégation et consultation sur la durée.
 - [ ] Enforcer des quotas agrégés par laboratoire/utilisateur et des limites de stockage ; ajouter des notifications d’alerte.
 - [ ] Convertir les liens visuels de topologie en vrais réseaux/interfaces Docker isolés.
-- [ ] Corriger le scénario de démonstration afin que les images disposent de `ping` (ou choisir un test disponible et le documenter).
+- [x] Rendre le scénario de démonstration exécutable avec `getent hosts`, sans dépendre de l’installation de `ping` dans les images minimales.
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
 - [ ] Rendre DNS/CoreDNS et DHCP disponibles après la prise en charge de configurations, segments réseau isolés et droits minimaux.
 - [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.

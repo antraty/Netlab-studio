@@ -36,11 +36,7 @@
     "from": "client-ubuntu",
     "to": "server-debian",
     "command": [
-      "ping",
-      "-c",
-      "1",
-      "-W",
-      "2",
+      "getent",
       "server-debian"
     ]
   },
