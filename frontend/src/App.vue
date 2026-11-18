@@ -29,6 +29,7 @@ const groups = ref<Group[]>([])
 const users = ref<User[]>([])
 const serviceCatalog = ref<ServiceProfile[]>([])
 const selectedServiceId = ref('nginx')
+const selectedTemplateId = ref('static-routing')
 const submissions = ref<Array<{ assignment_id: string; title: string; email: string; display_name: string; status: string; submitted_at: number | null }>>([])
 const assignments = ref<Assignment[]>([])
 const activeAssignmentId = ref('')
@@ -82,6 +83,44 @@ const topologyIssues = computed(() => {
   if (!current.nodes.some(node => node.name === current.connectivity_check.to)) issues.push('Le nœud destination du test est introuvable')
   return [...new Set(issues)]
 })
+const labTemplates: Array<{ id: string; label: string; description: string; topology: Topology }> = [
+  {
+    id: 'static-routing',
+    label: 'Routage statique client–routeur–serveur',
+    description: 'Deux LAN Docker, un routeur Linux et un test ping inter-réseaux.',
+    topology: {
+      version: 2, lab: 'static-routing-lab',
+      network: { name: 'lan-a', driver: 'bridge', subnet: '10.0.1.0/24' },
+      networks: [
+        { name: 'lan-a', driver: 'bridge', subnet: '10.0.1.0/24' },
+        { name: 'lan-b', driver: 'bridge', subnet: '10.0.2.0/24' },
+      ],
+      nodes: [
+        { name: 'client-ubuntu', image: 'netlab/ubuntu-lab:24.04', command: ['sleep', 'infinity'], position: { x: 50, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan-a', ipv4: '10.0.1.10/24', gateway: '10.0.1.1' }], routes: [{ destination: '10.0.2.0/24', via: '10.0.1.1' }] },
+        { name: 'router-linux', image: 'netlab/debian-router:bookworm', command: ['sleep', 'infinity'], position: { x: 300, y: 120 }, type: 'router', router: true, interfaces: [{ name: 'eth0', network: 'lan-a', ipv4: '10.0.1.1/24' }, { name: 'eth1', network: 'lan-b', ipv4: '10.0.2.1/24' }], routes: [] },
+        { name: 'server-debian', image: 'netlab/debian-lab:bookworm', command: ['sleep', 'infinity'], position: { x: 560, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan-b', ipv4: '10.0.2.10/24', gateway: '10.0.2.1' }], routes: [{ destination: '10.0.1.0/24', via: '10.0.2.1' }] },
+      ],
+      links: [{ from: 'client-ubuntu', to: 'router-linux' }, { from: 'router-linux', to: 'server-debian' }],
+      connectivity_check: { from: 'client-ubuntu', to: 'server-debian', command: ['ping', '-c', '1', '10.0.2.10'] },
+    },
+  },
+  {
+    id: 'simple-lan',
+    label: 'Réseau local Ubuntu–Debian',
+    description: 'Deux hôtes sur un même segment Docker pour les premiers exercices IP.',
+    topology: {
+      version: 2, lab: 'simple-lan-lab',
+      network: { name: 'lan', driver: 'bridge', subnet: '10.10.0.0/24' },
+      networks: [{ name: 'lan', driver: 'bridge', subnet: '10.10.0.0/24' }],
+      nodes: [
+        { name: 'client-ubuntu', image: 'netlab/ubuntu-lab:24.04', command: ['sleep', 'infinity'], position: { x: 150, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan', ipv4: '10.10.0.10/24' }], routes: [] },
+        { name: 'server-debian', image: 'netlab/debian-lab:bookworm', command: ['sleep', 'infinity'], position: { x: 470, y: 120 }, interfaces: [{ name: 'eth0', network: 'lan', ipv4: '10.10.0.20/24' }], routes: [] },
+      ],
+      links: [{ from: 'client-ubuntu', to: 'server-debian' }],
+      connectivity_check: { from: 'client-ubuntu', to: 'server-debian', command: ['ping', '-c', '1', '10.10.0.20'] },
+    },
+  },
+]
 function nodeStatus(name: string) { return statuses.value.find(node => node.name === name)?.state ?? 'inconnu' }
 function showError(error: unknown) { pageError.value = error instanceof Error ? error.message : 'Erreur inconnue' }
 
@@ -287,6 +326,17 @@ function setConnectivityCommand(command: string) {
   topology.value.connectivity_check.command = [command]
   dirty.value = true
 }
+function applyTemplate() {
+  const template = labTemplates.find(item => item.id === selectedTemplateId.value)
+  if (!template) return
+  if (dirty.value && !window.confirm('Remplacer la topologie actuelle et perdre les modifications non sauvegardées ?')) return
+  topology.value = structuredClone(template.topology)
+  selected.value = topology.value.nodes[0]?.name ?? null
+  dirty.value = true
+  terminalSocket.value?.close()
+  terminalOutput.value = `Modèle chargé : ${template.label}`
+  pageError.value = ''
+}
 function addNode() {
   if (!topology.value) return
   const name = window.prompt('Nom du nœud :', `linux-node-${topology.value.nodes.length + 1}`)
@@ -446,7 +496,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
     <main>
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <template v-if="topology">
-      <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label></section>
+      <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" @click="applyTemplate">Charger le modèle</button></section>
       <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>

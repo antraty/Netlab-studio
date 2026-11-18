@@ -37,6 +37,7 @@
 - [x] Ajouter dans l’éditeur Vue la configuration interactive des réseaux, interfaces, IP et routes v2, avec ajout/suppression contrôlée et activation du mode routeur.
 - [x] Ajouter une validation locale immédiate des références réseau, IPv4, routes et nœuds du test de connectivité avant sauvegarde ou déploiement.
 - [x] Ajouter l’édition contrôlée des paramètres des nœuds personnalisés et du test de connectivité depuis l’interface.
+- [x] Ajouter des modèles v2 prêts à l’emploi pour un réseau local simple et un scénario de routage statique client–routeur–serveur.
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
 - [ ] Rendre DNS/CoreDNS et DHCP disponibles après la prise en charge de configurations, segments réseau isolés et droits minimaux.
 - [ ] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
