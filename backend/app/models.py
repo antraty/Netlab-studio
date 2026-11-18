@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -93,6 +94,7 @@ class ConnectivityCheck(BaseModel):
 class Topology(BaseModel):
     version: int = 1
     lab: str
+    laboratory_id: str | None = None
     network: Network | None = None
     networks: list[Network] = Field(default_factory=list)
     nodes: list[Node]
@@ -104,6 +106,11 @@ class Topology(BaseModel):
         if self.version not in {1, 2}:
             raise ValueError("only topology format versions 1 and 2 are supported")
         netlab.validate_identifier(self.lab, "lab")
+        if self.laboratory_id is not None:
+            try:
+                UUID(self.laboratory_id)
+            except ValueError as exc:
+                raise ValueError("laboratory_id must be a UUID") from exc
         if self.version == 1:
             if self.network is None:
                 raise ValueError("version 1 requires network")
@@ -180,3 +187,12 @@ class VersionsResponse(BaseModel):
 
 class CloneRequest(BaseModel):
     new_lab: str
+
+
+class CreateLaboratoryRequest(BaseModel):
+    topology: dict[str, Any]
+
+
+class LaboratoryMemberRequest(BaseModel):
+    email: str
+    role: str = "viewer"

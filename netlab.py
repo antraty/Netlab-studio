@@ -249,6 +249,7 @@ def docker_run_args(topology: dict[str, Any], node: dict[str, Any], network_name
         "--cpus", f"{float(resources['cpu_cores']):g}",
         "--pids-limit", str(int(resources["pids"])),
         "--label", f"io.netlab.studio.lab={topology['lab']}",
+        *(["--label", f"io.netlab.studio.laboratory_id={topology['laboratory_id']}"] if topology.get("laboratory_id") else []),
         "--label", f"io.netlab.studio.memory-mb={int(resources['memory_mb'])}",
         "--label", f"io.netlab.studio.cpu-cores={float(resources['cpu_cores']):g}",
         "--label", f"io.netlab.studio.pids={int(resources['pids'])}",
@@ -293,7 +294,10 @@ def deploy(topology: dict[str, Any]) -> int:
         for network, runtime_name in zip(specs, runtime_networks):
             inspected = docker("network", "inspect", runtime_name, capture=True)
             if inspected.returncode != 0:
-                args = ["network", "create", "--driver", network["driver"], "--label", f"io.netlab.studio.lab={topology['lab']}", "--subnet", network["subnet"], runtime_name]
+                args = ["network", "create", "--driver", network["driver"], "--label", f"io.netlab.studio.lab={topology['lab']}"]
+                if topology.get("laboratory_id"):
+                    args += ["--label", f"io.netlab.studio.laboratory_id={topology['laboratory_id']}"]
+                args += ["--subnet", network["subnet"], runtime_name]
                 result = docker(*args, capture=True)
                 if result.returncode:
                     print(result.stderr.strip(), file=sys.stderr)

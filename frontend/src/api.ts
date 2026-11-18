@@ -21,6 +21,14 @@ export interface Assignment {
   submitted_at: number | null
   topology: Topology
 }
+export interface Laboratory {
+  id: string
+  name: string
+  status: 'stopped' | 'running' | 'expired' | 'failed'
+  created_at: number
+  expires_at: number
+  role: 'owner' | 'editor' | 'viewer'
+}
 export interface ServiceProfile {
   id: string
   label: string
@@ -38,6 +46,7 @@ export interface ServiceProfile {
 
 export interface ObservabilityLab {
   name: string
+  laboratory_id?: string | null
   node_count: number
   running_count: number
   cpu_percent: number | null
@@ -48,6 +57,7 @@ export interface ObservabilityLab {
 
 export interface ObservabilityNode {
   id: string
+  laboratory_id?: string | null
   lab: string
   name: string
   image: string
@@ -71,6 +81,7 @@ export interface ObservabilityNode {
 export interface ObservabilityNetwork {
   name: string
   lab: string | null
+  laboratory_id?: string | null
   driver: string
   scope: string
 }
@@ -161,4 +172,14 @@ export const api = {
   import: (topology: Topology) => request<{ topology: Topology }>('/api/laboratories/import', { method: 'POST', body: JSON.stringify({ topology }) }),
   action: (name: 'up' | 'down' | 'verify') => request<{ ok: boolean; exit_code: number }>(`/api/${name}`, { method: 'POST', body: '{}' }),
   terminal: (node: string, command: string[]) => request<{ ok: boolean; output: string; exit_code: number }>(`/api/nodes/${encodeURIComponent(node)}/terminal`, { method: 'POST', body: JSON.stringify({ command }) }),
+  laboratories: () => request<{ laboratories: Laboratory[] }>('/api/laboratories'),
+  laboratory: (id: string) => request<{ laboratory: Laboratory; topology: Topology }>(`/api/laboratories/${encodeURIComponent(id)}`),
+  createLaboratory: (topology: Topology) => request<{ laboratory: Laboratory; topology: Topology }>('/api/laboratories', { method: 'POST', body: JSON.stringify({ topology }) }),
+  saveLaboratory: (id: string, topology: Topology) => request<{ topology: Topology }>(`/api/laboratories/${encodeURIComponent(id)}/topology`, { method: 'PUT', body: JSON.stringify({ topology }) }),
+  laboratoryStatus: (id: string) => request<{ nodes: StatusNode[] }>(`/api/laboratories/${encodeURIComponent(id)}/status`),
+  laboratoryLogs: (id: string) => request<{ logs: Array<{ message: string; created_at: number }> }>(`/api/laboratories/${encodeURIComponent(id)}/logs`),
+  laboratoryVersions: (id: string) => request<{ lab: string; versions: VersionInfo[] }>(`/api/laboratories/${encodeURIComponent(id)}/versions`),
+  restoreLaboratory: (id: string, version: number) => request<{ topology: Topology }>(`/api/laboratories/${encodeURIComponent(id)}/versions/${version}/restore`, { method: 'POST', body: '{}' }),
+  laboratoryAction: (id: string, action: 'up' | 'down' | 'verify') => request<{ ok: boolean; exit_code: number; output: string }>(`/api/laboratories/${encodeURIComponent(id)}/actions/${action}`, { method: 'POST', body: '{}' }),
+  addLaboratoryMember: (id: string, email: string, role: 'editor' | 'viewer') => request<{ ok: boolean }>(`/api/laboratories/${encodeURIComponent(id)}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
 }

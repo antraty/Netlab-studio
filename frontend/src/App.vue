@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
-import type { Assignment, Group, ObservabilitySnapshot, ServiceProfile, User } from './api'
+import type { Assignment, Group, Laboratory, ObservabilitySnapshot, ServiceProfile, User } from './api'
 import type { Node, StatusNode, Topology, VersionInfo } from './types'
 
 const user = ref<User | null>(null)
@@ -15,6 +15,8 @@ const setupName = ref('')
 const setupEmail = ref('')
 const setupPassword = ref('')
 const topology = ref<Topology | null>(null)
+const laboratories = ref<Laboratory[]>([])
+const activeLaboratoryId = ref('')
 const statuses = ref<StatusNode[]>([])
 const logs = ref<string[]>([])
 const versions = ref<VersionInfo[]>([])
@@ -51,6 +53,9 @@ let observabilityCooldownTimer: number | undefined
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
+const activeLaboratory = computed(() => laboratories.value.find(item => item.id === activeLaboratoryId.value))
+const canModifyLaboratory = computed(() => user.value?.role === 'teacher' && ['owner', 'editor'].includes(activeLaboratory.value?.role ?? ''))
+const ownsLaboratory = computed(() => user.value?.role === 'teacher' && activeLaboratory.value?.role === 'owner')
 const deployableServices = computed(() => serviceCatalog.value.filter(profile => profile.deployable))
 const topologyNetworks = computed(() => topology.value?.networks ?? [])
 const topologyIssues = computed(() => {
@@ -133,6 +138,7 @@ async function initialize() {
     try { user.value = (await api.me()).user } catch { user.value = null }
     if (!user.value) return
     if (user.value.role === 'teacher') {
+      await loadLaboratories()
       await refresh(true)
       await loadObservability()
       if (!observabilityTimer) observabilityTimer = window.setInterval(() => loadObservability(), 15000)
@@ -141,6 +147,44 @@ async function initialize() {
     } else {
       await loadAssignments()
     }
+  } catch (error) { showError(error) }
+}
+async function loadLaboratories() {
+  const response = await api.laboratories()
+  laboratories.value = response.laboratories
+  if (!laboratories.value.some(lab => lab.id === activeLaboratoryId.value)) {
+    activeLaboratoryId.value = laboratories.value[0]?.id ?? ''
+  }
+}
+async function switchLaboratory(event: Event) {
+  const select = event.target as HTMLSelectElement
+  const nextId = select.value
+  if (dirty.value && !window.confirm('Abandonner les modifications non sauvegardées ?')) {
+    select.value = activeLaboratoryId.value
+    return
+  }
+  activeLaboratoryId.value = nextId
+  terminalSocket.value?.close()
+  dirty.value = false
+  selected.value = null
+  await refresh(true)
+}
+async function createLaboratory() {
+  if (!topology.value) return
+  const newLab = window.prompt('Nom du nouveau laboratoire :', `${topology.value.lab}-copy`)
+  if (!newLab?.trim()) return
+  try {
+    const topologyCopy = structuredClone(topology.value)
+    topologyCopy.lab = newLab.trim()
+    delete topologyCopy.laboratory_id
+    const result = await api.createLaboratory(topologyCopy)
+    await loadLaboratories()
+    activeLaboratoryId.value = result.laboratory.id
+    topology.value = result.topology
+    selected.value = topology.value.nodes[0]?.name ?? null
+    dirty.value = false
+    terminalOutput.value = `Nouveau laboratoire créé : ${topology.value.lab}`
+    await refresh(false)
   } catch (error) { showError(error) }
 }
 async function login() {
@@ -166,7 +210,7 @@ async function logout() {
   observabilityTimer = undefined
   observabilityCooldownTimer = undefined
   observabilityRefreshAllowed.value = true
-  terminalSocket.value?.close(); user.value = null; topology.value = null; assignments.value = []; observability.value = null; pageError.value = ''
+  terminalSocket.value?.close(); user.value = null; topology.value = null; laboratories.value = []; activeLaboratoryId.value = ''; assignments.value = []; observability.value = null; pageError.value = ''
 }
 
 async function loadEducation() {
@@ -257,9 +301,10 @@ function selectNode(node: Node) {
   connectTerminal(node.name)
 }
 function connectTerminal(nodeName: string) {
+  if (!activeLaboratoryId.value || !canModifyLaboratory.value) return
   terminalSocket.value?.close()
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const socket = new WebSocket(`${protocol}://${window.location.host}/ws/nodes/${encodeURIComponent(nodeName)}/terminal`)
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws/nodes/${encodeURIComponent(nodeName)}/terminal?laboratory_id=${encodeURIComponent(activeLaboratoryId.value)}`)
   socket.onopen = () => { terminalOutput.value = `Connexion au terminal de ${nodeName}…` }
   socket.onmessage = event => { terminalOutput.value += event.data }
   socket.onerror = () => { terminalOutput.value += '\nErreur de connexion terminal.' }
@@ -393,10 +438,25 @@ function dragNode(event: PointerEvent, node: Node) {
   selectNode(node)
 }
 async function refresh(loadTopology = !dirty.value) {
+  const laboratoryId = activeLaboratoryId.value
+  if (!laboratoryId) return
   try {
-    if (loadTopology) { const response = await api.topology(); topology.value = response.topology; selected.value ??= topology.value.nodes[0]?.name ?? null }
-    const [status, eventLog] = await Promise.all([api.status(), api.logs()]); statuses.value = status.nodes; logs.value = eventLog.logs
-    if (topology.value) versions.value = (await api.versions(topology.value.lab)).versions
+    if (loadTopology) {
+      const response = await api.laboratory(laboratoryId)
+      topology.value = response.topology
+      selected.value = topology.value.nodes[0]?.name ?? null
+    }
+    const [status, eventLog, versionList] = await Promise.all([
+      api.laboratoryStatus(laboratoryId),
+      api.laboratoryLogs(laboratoryId),
+      api.laboratoryVersions(laboratoryId),
+    ])
+    statuses.value = status.nodes
+    logs.value = eventLog.logs
+      .map(item => `${new Date(item.created_at * 1000).toLocaleString()} ${item.message}`)
+      .reverse()
+    versions.value = versionList.versions
+    laboratories.value = (await api.laboratories()).laboratories
   } catch (error) { showError(error) }
 }
 async function loadObservability() {
@@ -437,12 +497,21 @@ function topologyReady() {
   pageError.value = `Topologie invalide : ${topologyIssues.value[0]}`
   return false
 }
-async function action(name: 'up' | 'down' | 'verify') { try { if (name !== 'down' && !topologyReady()) return; const result = await api.action(name); terminalOutput.value = result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`; await refresh() } catch (error) { showError(error) } }
-async function save() { if (!topology.value || !topologyReady()) return; try { await api.save(topology.value); dirty.value = false; await refresh() } catch (error) { showError(error) } }
-async function restore() { if (!topology.value || !versions.value.length) return; const raw = window.prompt(`Version à restaurer (${versions.value.map(version => version.version).join(', ')})`, String(versions.value[0].version)); const version = Number(raw); if (!Number.isInteger(version)) return; try { const response = await api.restore(topology.value.lab, version); topology.value = response.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
-async function cloneLab() { if (!topology.value) return; const newLab = window.prompt('Nom du laboratoire cloné :', `${topology.value.lab}-copy`); if (!newLab) return; try { await api.clone(topology.value.lab, newLab); terminalOutput.value = `laboratoire cloné : ${newLab}`; await refresh(false) } catch (error) { showError(error) } }
-async function exportLab() { if (!topology.value) return; try { const payload = await api.export(topology.value.lab); const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${topology.value.lab}.netlab.json`; link.click(); URL.revokeObjectURL(link.href) } catch (error) { showError(error) } }
-async function importLab(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file) return; try { const payload = JSON.parse(await file.text()); const response = await api.import(payload.topology ?? payload); topology.value = response.topology; selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = false; terminalOutput.value = `laboratoire importé : ${topology.value.lab}`; await refresh(false) } catch (error) { showError(error) } finally { input.value = '' } }
+async function action(name: 'up' | 'down' | 'verify') { if (!activeLaboratoryId.value) return; if (!canModifyLaboratory.value) { pageError.value = 'Ce laboratoire est en lecture seule.'; return }; try { if (name !== 'down' && !topologyReady()) return; const result = await api.laboratoryAction(activeLaboratoryId.value, name); terminalOutput.value = result.output || (result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`); await refresh(false) } catch (error) { showError(error) } }
+async function save() { if (!topology.value || !topologyReady() || !activeLaboratoryId.value) return; if (!canModifyLaboratory.value) { pageError.value = 'Ce laboratoire est en lecture seule.'; return }; try { const result = await api.saveLaboratory(activeLaboratoryId.value, topology.value); topology.value = result.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
+async function restore() { if (!activeLaboratoryId.value || !versions.value.length) return; const raw = window.prompt(`Version à restaurer (${versions.value.map(version => version.version).join(', ')})`, String(versions.value[0].version)); const version = Number(raw); if (!Number.isInteger(version)) return; try { const response = await api.restoreLaboratory(activeLaboratoryId.value, version); topology.value = response.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
+async function cloneLab() { await createLaboratory() }
+async function shareLaboratory() {
+  if (!activeLaboratoryId.value || activeLaboratory.value?.role !== 'owner') return
+  const email = window.prompt('Adresse e-mail du membre :')
+  if (!email?.trim()) return
+  const role = window.prompt('Rôle : editor ou viewer', 'viewer')
+  if (role !== 'editor' && role !== 'viewer') { pageError.value = 'Rôle invalide : choisissez editor ou viewer.'; return }
+  try { await api.addLaboratoryMember(activeLaboratoryId.value, email.trim(), role); pageError.value = `Accès ${role} accordé à ${email.trim()}.` }
+  catch (error) { showError(error) }
+}
+async function exportLab() { if (!topology.value || !activeLaboratoryId.value) return; try { const payload = { format: 'netlab-laboratory-v1', topology: topology.value, versions: (await api.laboratoryVersions(activeLaboratoryId.value)).versions }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${topology.value.lab}.netlab.json`; link.click(); URL.revokeObjectURL(link.href) } catch (error) { showError(error) } }
+async function importLab(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file) return; try { const payload = JSON.parse(await file.text()) as Topology | { topology: Topology }; const imported = 'topology' in payload ? payload.topology : payload; delete imported.laboratory_id; const response = await api.createLaboratory(imported); await loadLaboratories(); activeLaboratoryId.value = response.laboratory.id; topology.value = response.topology; selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = false; terminalOutput.value = `laboratoire importé : ${topology.value.lab}`; await refresh(false) } catch (error) { showError(error) } finally { input.value = '' } }
 async function runTerminal() { const socket = terminalSocket.value; const command = terminalCommand.value.trim(); if (!socket || socket.readyState !== WebSocket.OPEN || !command) { terminalOutput.value = 'Sélectionnez un nœud avec Docker actif.'; return }; socket.send(command); terminalCommand.value = '' }
 
 onMounted(async () => { await initialize() })
@@ -492,11 +561,11 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
     <footer>Netlab Studio — copie pédagogique sauvegardée ; aucun déploiement Docker étudiant n’est exposé.</footer>
   </template>
   <template v-else>
-    <header><div><p class="eyebrow">NETLAB STUDIO / ESPACE ENSEIGNANT</p><h1>{{ topology?.lab ?? 'Laboratoire' }}</h1></div><div class="header-actions"><span class="badge online">{{ stateText }}</span><span class="badge">{{ user.display_name }}</span><button class="secondary" @click="logout">Déconnexion</button></div></header>
+    <header><div><p class="eyebrow">NETLAB STUDIO / ESPACE ENSEIGNANT</p><h1>{{ topology?.lab ?? 'Laboratoire' }}</h1><span v-if="activeLaboratory">Expire le {{ new Date(activeLaboratory.expires_at * 1000).toLocaleString() }}</span></div><div class="header-actions"><select :value="activeLaboratoryId" aria-label="Laboratoire actif" @change="switchLaboratory($event)"><option v-for="lab in laboratories" :key="lab.id" :value="lab.id">{{ lab.name }} · {{ lab.status }}</option></select><button class="secondary" @click="createLaboratory">Nouveau laboratoire</button><span class="badge online">{{ stateText }}</span><span class="badge">{{ user.display_name }}</span><button class="secondary" @click="logout">Déconnexion</button></div></header>
     <main>
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <template v-if="topology">
-      <section class="toolbar"><button @click="action('up')">Déployer</button><button class="secondary" @click="action('verify')">Tester la connectivité</button><button class="danger" @click="action('down')">Arrêter</button><button class="secondary" @click="save">Nouvelle version</button><button class="secondary" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button class="secondary" @click="exportLab">Exporter</button><label class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" @click="applyTemplate">Charger le modèle</button></section>
+      <section class="toolbar"><button :disabled="!canModifyLaboratory" @click="action('up')">Déployer</button><button class="secondary" :disabled="!canModifyLaboratory" @click="action('verify')">Tester la connectivité</button><button class="danger" :disabled="!canModifyLaboratory" @click="action('down')">Arrêter</button><button class="secondary" :disabled="!canModifyLaboratory" @click="save">Nouvelle version</button><button class="secondary" :disabled="!canModifyLaboratory" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button v-if="ownsLaboratory" class="secondary" @click="shareLaboratory">Partager</button><button class="secondary" @click="exportLab">Exporter</button><label v-if="canModifyLaboratory" class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button></section>
       <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Les profils disponibles sont limités à Nginx et Apache. Un port hôte est facultatif et lié uniquement à 127.0.0.1. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>

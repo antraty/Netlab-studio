@@ -333,9 +333,24 @@ Le worker doit rester sur un réseau privé ou localhost : le token est une prem
 
 ### Étape 7 — comptes et partage pédagogique (prototype local)
 
-Le prototype inclut désormais des comptes enseignants/étudiants, des sessions locales stockées sous forme de hachages, un cookie de session `HttpOnly`, une protection CSRF, des groupes, l’affectation d’un instantané de topologie à un groupe, une copie JSON personnelle par étudiant et le suivi des remises. La base SQLite est locale dans `.netlab-data/education.sqlite3` (ou `NETLAB_EDUCATION_DB`) ; sauvegardez-la avec les données pédagogiques.
+Le prototype inclut des comptes enseignants/étudiants, des sessions locales stockées sous forme de hachages, un cookie de session `HttpOnly`, une protection CSRF, des groupes, des instantanés de topologie, des copies JSON étudiantes et le suivi des remises. SQLite reste le choix local par défaut (`.netlab-data/education.sqlite3` ou `NETLAB_EDUCATION_DB`).
 
-Les étudiants peuvent éditer/sauvegarder leur copie JSON et la remettre à l’enseignant. Ils ne peuvent pas appeler les routes du plan de contrôle Docker ni ouvrir le terminal WebSocket. **Les copies étudiantes ne sont pas encore exécutables** : il n’existe toujours pas d’isolation de conteneurs par étudiant ni de stockage multi-utilisateur cloud. Les enseignants, eux, pilotent toujours le laboratoire local unique du prototype.
+Les étudiants peuvent éditer/sauvegarder leur copie JSON et la remettre à l’enseignant. Ces copies pédagogiques ne sont pas encore exécutables ou isolées individuellement.
+
+### Phase 3 — multi-laboratoires (première tranche)
+
+L’API peut utiliser PostgreSQL pour les comptes, sessions, affectations et métadonnées/topologies courantes des laboratoires en définissant `NETLAB_DATABASE_URL`. Sans cette variable, SQLite local reste utilisé. Pour copier une base SQLite existante vers une base PostgreSQL vide, sauvegardez d’abord les données puis exécutez :
+
+```bash
+export NETLAB_DATABASE_URL='postgresql://netlab:mot-de-passe@127.0.0.1:5432/netlab'
+python3 -m backend.app.migrate_db --source .netlab-data/education.sqlite3
+```
+
+Le script copie les comptes, sessions, données pédagogiques et événements de laboratoire ; il ne déplace pas les fichiers de versions immuables sous `NETLAB_DATA_DIR`. Chaque laboratoire a maintenant un identifiant UUID, un propriétaire, des membres `editor`/`viewer`, des journaux, des opérations API et des labels Docker propres. L’éditeur permet de créer et sélectionner plusieurs laboratoires ; les déploiements peuvent coexister sans réutiliser leurs noms de conteneurs/réseaux.
+
+Les limites configurables sont `NETLAB_MAX_LABS_PER_USER` (laboratoires possédés), `NETLAB_MAX_RUNNING_LABS_PER_USER` (laboratoires possédés ou édités), `NETLAB_MAX_NODES_PER_LAB`, `NETLAB_MAX_CPU_CORES_PER_LAB`, `NETLAB_MAX_MEMORY_MB_PER_LAB`, `NETLAB_MAX_RUNNING_CPU_CORES_PER_USER`, `NETLAB_MAX_RUNNING_MEMORY_MB_PER_USER` et `NETLAB_LAB_TTL_HOURS`. Le plan de contrôle nettoie les laboratoires expirés au démarrage puis toutes les 60 secondes. Les limites Docker CPU/mémoire par nœud restent également appliquées.
+
+Cette tranche ne rend pas encore le déploiement multi-hôte prêt pour la production : les fichiers de versions sont locaux, les quotas de stockage ne sont pas appliqués, et le nettoyage dépend de l’API de contrôle active. Les copies étudiantes des affectations restent non exécutables ; l’isolation pédagogique par étudiant et la haute disponibilité des workers restent à faire.
 
 Cette authentification est une première protection pour le prototype local, pas une certification ni un feu vert pour une exposition publique. Avant une mise en service, il faudra notamment HTTPS, un secret de session robuste, une politique de sauvegarde/récupération, une limitation des tentatives de connexion, un déploiement isolé du worker, des quotas, une séparation des ressources par laboratoire et une revue de sécurité.
 
@@ -492,9 +507,9 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Le projet est au stade du **prototype technique local**. L’idée produit et la vision long terme sont définies ; les briques couvrent désormais un laboratoire Docker multi-réseaux v2, une interface web, des comptes enseignants/étudiants, un flux élémentaire de partage pédagogique et un premier catalogue de services web. Cela ne constitue pas encore une plateforme multi-utilisateur déployable dans le cloud.
+Le projet reste un **prototype**, mais les phases 1 et 2 sont opérationnelles et une première tranche de la phase 3 est en place : comptes, laboratoires UUID séparés, membres et rôles, exécution Docker par laboratoire, limites CPU/mémoire, expiration et stockage PostgreSQL optionnel. Le mode SQLite local reste disponible.
 
-La prochaine cible est l’exécution depuis l’interface web du scénario **client Ubuntu — routeur Linux — serveur Debian**, avec deux segments, des adresses IP et du routage réel. Les laboratoires multi-services, les machines virtuelles, le partage pédagogique exécutable, la supervision et le cloud viendront ensuite.
+Cela ne constitue pas encore une plateforme cloud de production : l’historique de versions est local, les quotas de stockage ne sont pas appliqués, la file de tâches/haute disponibilité des workers n’est pas achevée et les copies étudiantes ne sont pas exécutables. La prochaine cible est de rendre la persistance et le runtime réellement distribués, puis d’ajouter les quotas de stockage et l’isolation pédagogique.
 
 ## Prototype technique — étape 1
 

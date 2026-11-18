@@ -2,12 +2,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from backend.app import education
-from backend.app.education import EducationStore
+from backend.app.education import DatabaseConnection, EducationStore
+from backend.app.storage import TopologyStore
 from netlab import load_topology
 
 
@@ -18,12 +20,16 @@ class EducationApiTests(unittest.TestCase):
         self.previous_token = os.environ.get("NETLAB_BOOTSTRAP_TOKEN")
         os.environ["NETLAB_BOOTSTRAP_TOKEN"] = "test-setup-secret"
         education.store = EducationStore(Path(self.tempdir.name) / "education.sqlite3")
-        from backend.app.main import app
-        self.client = TestClient(app)
+        from backend.app import main
+        self.main_module = main
+        self.previous_topology_store = main.control.store
+        main.control.store = TopologyStore(Path(self.tempdir.name) / "topologies")
+        self.client = TestClient(main.app)
 
     def tearDown(self):
         self.client.close()
         education.store = self.previous_store
+        self.main_module.control.store = self.previous_topology_store
         if self.previous_token is None:
             os.environ.pop("NETLAB_BOOTSTRAP_TOKEN", None)
         else:
@@ -32,6 +38,26 @@ class EducationApiTests(unittest.TestCase):
 
     def csrf_headers(self, client):
         return {"X-Netlab-CSRF": client.cookies.get("netlab_csrf", "")}
+
+    def test_postgres_connection_translates_sqlite_placeholders_and_collation(self):
+        class FakeConnection:
+            statement = ""
+            parameters = ()
+
+            def execute(self, statement, parameters):
+                self.statement = statement
+                self.parameters = parameters
+
+        connection = FakeConnection()
+        DatabaseConnection(connection, postgres=True).execute(
+            "SELECT id FROM users WHERE email=? ORDER BY display_name COLLATE NOCASE",
+            ("teacher@example.test",),
+        )
+        self.assertEqual(
+            connection.statement,
+            "SELECT id FROM users WHERE email=%s ORDER BY lower(display_name)",
+        )
+        self.assertEqual(connection.parameters, ("teacher@example.test",))
 
     def test_educational_flow_is_authenticated_and_student_cannot_deploy(self):
         topology = load_topology(Path(__file__).parent / "topology.json")
@@ -94,12 +120,30 @@ class EducationApiTests(unittest.TestCase):
         response = self.client.get("/api/services")
         self.assertEqual(response.status_code, 200)
         self.assertEqual({service["id"] for service in response.json()["services"] if service["deployable"]}, {"nginx", "apache"})
+        laboratory = self.client.get("/api/laboratories").json()["laboratories"][0]
         from backend.app.main import control
         sample = {
             "available": True,
             "active_lab_count": 1,
             "running_node_count": 2,
-            "labs": [], "nodes": [], "networks": [], "storage": [], "alerts": [], "errors": [],
+            "labs": [
+                {"name": laboratory["name"], "laboratory_id": laboratory["id"], "running_count": 1},
+                {"name": "another-owner-lab", "laboratory_id": "unshared", "running_count": 8},
+            ],
+            "nodes": [
+                {"lab": laboratory["name"], "laboratory_id": laboratory["id"], "state": "running"},
+                {"lab": "another-owner-lab", "laboratory_id": "unshared", "state": "running"},
+            ],
+            "networks": [
+                {"lab": laboratory["name"], "laboratory_id": laboratory["id"]},
+                {"lab": "another-owner-lab", "laboratory_id": "unshared"},
+            ],
+            "storage": [{"kind": "Images", "used_bytes": 100}],
+            "alerts": [
+                {"severity": "warning", "lab": laboratory["name"], "message": "own"},
+                {"severity": "warning", "lab": "another-owner-lab", "message": "other"},
+            ],
+            "errors": ["global host error"],
             "events": [], "truncated": False,
             "thresholds": {"cpu_percent": 80, "memory_percent": 80, "writable_storage_mb": 1024},
         }
@@ -107,6 +151,12 @@ class EducationApiTests(unittest.TestCase):
             response = self.client.get("/api/observability")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["active_lab_count"], 1)
+        self.assertEqual(len(response.json()["labs"]), 1)
+        self.assertEqual(len(response.json()["nodes"]), 1)
+        self.assertEqual(len(response.json()["networks"]), 1)
+        self.assertEqual(response.json()["storage"], [])
+        self.assertEqual([alert["lab"] for alert in response.json()["alerts"]], [laboratory["name"]])
+        self.assertEqual(response.json()["errors"], [])
         response = self.client.post("/api/education/groups", json={"name": "No CSRF"})
         self.assertEqual(response.status_code, 403)
 
@@ -120,6 +170,155 @@ class EducationApiTests(unittest.TestCase):
         response = self.client.post("/api/auth/login", json={"email": "nobody@example.test", "password": "wrong-password"})
         self.assertEqual(response.status_code, 429)
         login_throttle._failures.clear()
+
+    def test_laboratory_records_are_scoped_and_roles_are_enforced(self):
+        state = self.client.post("/api/auth/bootstrap", json={
+            "bootstrap_token": "test-setup-secret", "email": "teacher@example.test",
+            "display_name": "Teacher", "password": "long-password-123",
+        })
+        self.assertEqual(state.status_code, 200, state.text)
+        teacher_headers = self.csrf_headers(self.client)
+        topology = load_topology(Path(__file__).parent / "topology.json")
+
+        initial = self.client.get("/api/laboratories")
+        self.assertEqual(initial.status_code, 200, initial.text)
+        self.assertEqual(len(initial.json()["laboratories"]), 1)
+        default_topology = self.client.get("/api/topology").json()["topology"]
+        self.assertEqual(default_topology["laboratory_id"], initial.json()["laboratories"][0]["id"])
+        created = self.client.post("/api/laboratories", headers=teacher_headers, json={"topology": topology})
+        self.assertEqual(created.status_code, 201, created.text)
+        laboratory = created.json()["laboratory"]
+        laboratory_id = laboratory["id"]
+        self.assertEqual(created.json()["topology"]["laboratory_id"], laboratory_id)
+        self.assertNotEqual(created.json()["topology"]["lab"], topology["lab"])
+        self.assertNotEqual(created.json()["topology"]["lab"], default_topology["lab"])
+        versions = self.client.get(f"/api/laboratories/{laboratory_id}/versions")
+        self.assertEqual(versions.status_code, 200, versions.text)
+        self.assertEqual(len(versions.json()["versions"]), 1)
+
+        with patch("backend.app.main.build_orchestrator") as build:
+            build.return_value.action.return_value = SimpleNamespace(ok=True, exit_code=0, output="")
+            deploy = self.client.post(
+                f"/api/laboratories/{laboratory_id}/actions/up",
+                headers=teacher_headers,
+                json={},
+            )
+        self.assertEqual(deploy.status_code, 200, deploy.text)
+        self.assertEqual(deploy.json()["action"], "up")
+        self.assertEqual(self.client.get(f"/api/laboratories/{laboratory_id}").json()["laboratory"]["status"], "running")
+        repeated_deploy = self.client.post(
+            f"/api/laboratories/{laboratory_id}/actions/up",
+            headers=teacher_headers,
+            json={},
+        )
+        self.assertEqual(repeated_deploy.status_code, 409)
+
+        other_teacher = education.store.create_user(
+            "other-teacher@example.test", "Other teacher", "another-password-123", "teacher",
+        )
+        other = TestClient(self.client.app)
+        other_login = other.post(
+            "/api/auth/login",
+            json={"email": other_teacher["email"], "password": "another-password-123"},
+        )
+        self.assertEqual(other_login.status_code, 200, other_login.text)
+        other_topology = other.get("/api/topology").json()["topology"]
+        self.assertNotEqual(other_topology["laboratory_id"], default_topology["laboratory_id"])
+        self.assertEqual(other.get(f"/api/laboratories/{laboratory_id}").status_code, 404)
+        self.assertEqual(other.get(f"/api/laboratories/{laboratory['name']}/export").status_code, 404)
+        other.close()
+
+        student_response = self.client.post("/api/education/users", headers=teacher_headers, json={
+            "email": "viewer@example.test", "display_name": "Viewer", "password": "student-password-123",
+        })
+        self.assertEqual(student_response.status_code, 201, student_response.text)
+        member_response = self.client.post(
+            f"/api/laboratories/{laboratory_id}/members",
+            headers=teacher_headers,
+            json={"email": "viewer@example.test", "role": "viewer"},
+        )
+        self.assertEqual(member_response.status_code, 201, member_response.text)
+
+        viewer = TestClient(self.client.app)
+        login = viewer.post("/api/auth/login", json={"email": "viewer@example.test", "password": "student-password-123"})
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertEqual(viewer.get(f"/api/laboratories/{laboratory_id}").status_code, 200)
+        update = viewer.put(
+            f"/api/laboratories/{laboratory_id}/topology",
+            headers=self.csrf_headers(viewer),
+            json={"topology": created.json()["topology"]},
+        )
+        self.assertEqual(update.status_code, 403)
+        deploy = viewer.post(
+            f"/api/laboratories/{laboratory_id}/actions/up",
+            headers=self.csrf_headers(viewer),
+            json={},
+        )
+        self.assertEqual(deploy.status_code, 403)
+        self.assertEqual(viewer.get("/api/laboratories").json()["laboratories"][0]["role"], "viewer")
+        viewer.close()
+
+    def test_laboratory_quotas_and_expiration_are_persisted(self):
+        teacher = education.store.create_user(
+            "quota@example.test", "Quota", "long-password-123", "teacher",
+        )
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        with patch.dict(os.environ, {
+            "NETLAB_MAX_LABS_PER_USER": "1",
+            "NETLAB_MAX_NODES_PER_LAB": "3",
+            "NETLAB_LAB_TTL_HOURS": "1",
+        }):
+            laboratory = education.store.create_laboratory(teacher["id"], topology)
+            self.assertEqual(laboratory["status"], "stopped")
+            self.assertGreater(laboratory["expires_at"], laboratory["created_at"])
+            with self.assertRaisesRegex(education.EducationError, "quota reached"):
+                education.store.create_laboratory(teacher["id"], topology)
+        with education.store._connect() as db:
+            db.execute(
+                "UPDATE laboratories SET status='running',expires_at=? WHERE id=?",
+                (0, laboratory["id"]),
+            )
+        expired = education.store.expired_laboratories()
+        self.assertEqual([item["id"] for item in expired], [laboratory["id"]])
+
+    def test_cpu_and_memory_quotas_are_enforced_before_running(self):
+        teacher = education.store.create_user(
+            "resources@example.test", "Resources", "long-password-123", "teacher",
+        )
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        with patch.dict(os.environ, {"NETLAB_MAX_CPU_CORES_PER_LAB": "2"}):
+            with self.assertRaisesRegex(education.EducationError, "CPU quota"):
+                education.store.create_laboratory(teacher["id"], topology)
+
+        with patch.dict(os.environ, {
+            "NETLAB_MAX_CPU_CORES_PER_LAB": "8",
+            "NETLAB_MAX_RUNNING_CPU_CORES_PER_USER": "5",
+            "NETLAB_MAX_RUNNING_MEMORY_MB_PER_USER": "8192",
+            "NETLAB_MAX_RUNNING_LABS_PER_USER": "2",
+        }):
+            first = education.store.create_laboratory(teacher["id"], topology)
+            second = education.store.create_laboratory(teacher["id"], topology)
+            education.store.claim_laboratory_run(first["id"], teacher["id"])
+            with self.assertRaisesRegex(education.EducationError, "CPU user quota"):
+                education.store.claim_laboratory_run(second["id"], teacher["id"])
+
+    def test_expiration_sweeper_cleans_expired_runtime(self):
+        teacher = education.store.create_user(
+            "expiry@example.test", "Expiry", "long-password-123", "teacher",
+        )
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        laboratory = education.store.create_laboratory(teacher["id"], topology)
+        with education.store._connect() as db:
+            db.execute(
+                "UPDATE laboratories SET status='running',expires_at=? WHERE id=?",
+                (0, laboratory["id"]),
+            )
+        from backend.app import main
+        with patch.object(main, "build_orchestrator") as build:
+            build.return_value.action.return_value = SimpleNamespace(ok=True, exit_code=0, output="")
+            main.expire_laboratories()
+        stored = education.store.laboratory(laboratory["id"], teacher["id"])
+        self.assertEqual(stored["status"], "expired")
 
 
 if __name__ == "__main__":

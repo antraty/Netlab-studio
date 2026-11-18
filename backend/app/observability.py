@@ -93,6 +93,7 @@ def _parse_ps(stdout: str) -> list[dict[str, Any]]:
             continue
         nodes.append({
             "id": container_id,
+            "laboratory_id": labels.get("io.netlab.studio.laboratory_id"),
             "lab": lab,
             "name": name,
             "image": image,
@@ -246,14 +247,22 @@ def collect_docker_observability(docker: Callable[..., Any] = netlab.docker) -> 
             if len(columns) != 4:
                 continue
             name, driver, scope, raw_labels = columns
-            lab = _labels(raw_labels).get("io.netlab.studio.lab")
-            network_records[name] = {"name": name, "lab": lab, "driver": driver, "scope": scope}
+            labels = _labels(raw_labels)
+            lab = labels.get("io.netlab.studio.lab")
+            network_records[name] = {
+                "name": name,
+                "lab": lab,
+                "laboratory_id": labels.get("io.netlab.studio.laboratory_id"),
+                "driver": driver,
+                "scope": scope,
+            }
 
     for node in nodes:
         for network_name in node["networks"]:
             network_records.setdefault(network_name, {
                 "name": network_name,
                 "lab": node["lab"],
+                "laboratory_id": node["laboratory_id"],
                 "driver": "inconnu",
                 "scope": "inconnu",
             })
@@ -292,6 +301,7 @@ def collect_docker_observability(docker: Callable[..., Any] = netlab.docker) -> 
     for node in nodes:
         lab = labs.setdefault(node["lab"], {
             "name": node["lab"],
+            "laboratory_id": node["laboratory_id"],
             "node_count": 0,
             "running_count": 0,
             "cpu_percent": 0.0,

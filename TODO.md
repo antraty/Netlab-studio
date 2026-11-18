@@ -23,12 +23,14 @@
 - [x] Relayer l’observabilité en mode worker distant et borner l’inventaire à 100 conteneurs.
 - [ ] Ajouter invitations sûres, récupération/réinitialisation de mot de passe et limitation des tentatives.
 - [ ] Ajouter rôles administrateur/enseignant/étudiant plus granulaires, groupes de travail et permissions par laboratoire.
+- [x] Ajouter les identifiants UUID de laboratoire, rôles `owner`/`editor`/`viewer`, API d’exécution isolée par ID et sélection de plusieurs laboratoires.
 - [ ] Construire l’édition visuelle des copies étudiantes et des modèles de TP prêts à l’emploi.
 - [ ] Isoler l’exécution Docker et les ressources par étudiant/laboratoire avant toute exécution partagée.
-- [ ] Migrer la persistance vers PostgreSQL lorsque plusieurs utilisateurs/cloud seront supportés.
-- [ ] Compléter la file de tâches, les identités de workers, les quotas agrégés, mTLS et l’observabilité persistante de production.
+- [x] Ajouter PostgreSQL configurable et un outil de copie SQLite vers PostgreSQL pour les comptes, sessions, affectations et topologies courantes.
+- [x] Appliquer des quotas de laboratoires/nœuds, CPU/mémoire par laboratoire et par utilisateur actif ; expirer et nettoyer automatiquement les laboratoires.
+- [ ] Compléter la file de tâches, les identités de workers, mTLS et l’observabilité persistante de production.
 - [ ] Historiser les métriques et définir rétention, agrégation et consultation sur la durée.
-- [ ] Enforcer des quotas agrégés par laboratoire/utilisateur et des limites de stockage ; ajouter des notifications d’alerte.
+- [ ] Ajouter les quotas de stockage, des limites persistantes, et des notifications d’alerte ; rendre l’expiration résiliente aux redémarrages et aux workers indisponibles.
 - [x] Convertir les segments v2 et les interfaces déclarées en vrais réseaux Docker isolés.
 - [x] Rendre le scénario de démonstration exécutable avec `getent hosts`, sans dépendre de l’installation de `ping` dans les images minimales.
 - [x] Introduire la topologie v2 avec plusieurs segments Docker, interfaces IPv4 et routes statiques.

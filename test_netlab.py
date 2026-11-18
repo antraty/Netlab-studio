@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from netlab import TopologyError, deploy, load_topology, validate_topology
+from netlab import TopologyError, deploy, docker_run_args, load_topology, validate_topology
 
 
 ROOT = Path(__file__).parent
@@ -79,6 +79,15 @@ class TopologyTests(unittest.TestCase):
         self.assertEqual(len(connects), 1)
         self.assertEqual(len(routes), 2)
         self.assertIn("10.0.2.0/24", routes[0])
+
+    def test_docker_resources_include_laboratory_uuid_label(self):
+        topology = load_topology(ROOT / "topology.json")
+        topology["laboratory_id"] = "2de2ac28-f610-4c1d-8a22-f79b79012e1e"
+        args = docker_run_args(topology, topology["nodes"][0], "netlab-test-lan")
+        self.assertIn(
+            "io.netlab.studio.laboratory_id=2de2ac28-f610-4c1d-8a22-f79b79012e1e",
+            args,
+        )
 
     def test_invalid_json_is_rejected(self):
         path = ROOT / ".invalid-topology.json"
