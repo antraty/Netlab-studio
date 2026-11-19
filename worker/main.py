@@ -71,6 +71,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 orchestrator = DockerOrchestrator(job["topology"])
                 started = time.monotonic()
                 try:
+                    queue_request(
+                        f"/api/execution/worker/jobs/{job['id']}/progress",
+                        {
+                            "worker_id": WORKER_ID,
+                            "percent": 10,
+                            "phase": "started",
+                        },
+                    )
                     if job["action"] == "status":
                         result_payload = {
                             "ok": True, "exit_code": 0, "output": "",

@@ -611,9 +611,11 @@ L’éditeur visuel est disponible : les nœuds peuvent être déplacés, ajout�
 La Tranche 1 fournit un profil Docker Compose pour lancer le frontend, l’API FastAPI, le worker Docker et PostgreSQL :
 
 ```bash
-cp .env.example .env
-docker compose up --build -d
+make setup
+make up
 ```
+
+`make setup` crée `.env` avec des secrets locaux aléatoires sans écraser une configuration existante. `make up` construit les trois images de laboratoire puis démarre Compose. Vérifier l’état avec `make ps`, `curl http://localhost:8080/health` et `curl http://localhost:8080/ready`.
 
 Consulter [`DEPLOYMENT.md`](DEPLOYMENT.md) pour les prérequis, la construction des images de laboratoire, le flux réseau, le bootstrap du premier enseignant et les précautions avant une exposition publique. Le profil local expose uniquement `http://localhost:8080`; le socket Docker reste monté uniquement dans le worker.
 

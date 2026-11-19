@@ -1,6 +1,14 @@
-.PHONY: up down logs ps test frontend-build config
+.PHONY: setup lab-images up down logs ps test frontend-build config
 
-up:
+setup:
+	python3 scripts/setup.py
+
+lab-images:
+	docker build -t netlab/ubuntu-lab:24.04 images/ubuntu-lab
+	docker build -t netlab/debian-lab:bookworm images/debian-lab
+	docker build -t netlab/debian-router:bookworm images/debian-router
+
+up: setup lab-images
 	docker compose up --build -d
 
 down:
@@ -13,7 +21,7 @@ ps:
 	docker compose ps
 
 test:
-	python3 -m unittest discover -v
+	@if [ -x .venv/bin/python ]; then .venv/bin/python -m unittest discover -v; else python3 -m unittest discover -v; fi
 
 frontend-build:
 	cd frontend && npm ci && npm run build

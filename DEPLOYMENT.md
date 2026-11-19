@@ -18,13 +18,13 @@ docker build -t netlab/debian-router:bookworm images/debian-router
 ## Lancement local
 
 ```bash
-cp .env.example .env
-# Remplacer au minimum les trois valeurs replace-with-*.
-docker compose up --build -d
+make setup
+make up
 
 docker compose ps
 # Interface : http://localhost:8080
 # Santé de la pile : http://localhost:8080/health
+make ps
 ```
 
 Le premier compte enseignant est créé depuis l’interface avec `NETLAB_BOOTSTRAP_TOKEN`. Le worker et PostgreSQL ne sont pas publiés sur l’hôte. Seul le frontend expose le port HTTP 8080 par défaut.

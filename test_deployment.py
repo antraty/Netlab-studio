@@ -1,5 +1,7 @@
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parent
@@ -36,6 +38,34 @@ class DeploymentContractTests(unittest.TestCase):
         frontend = (ROOT / "docker/frontend.Dockerfile").read_text(encoding="utf-8")
         self.assertIn("npm ci", frontend)
         self.assertIn("npm run build", frontend)
+
+    def test_setup_generates_secrets_only_when_env_is_missing(self) -> None:
+        from scripts import setup
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_example = root / ".env.example"
+            env_file = root / ".env"
+            env_example.write_text(
+                "POSTGRES_PASSWORD=replace-with-a-long-random-password\n"
+                "NETLAB_WORKER_TOKEN=replace-with-a-long-random-token\n"
+                "NETLAB_BOOTSTRAP_TOKEN=replace-with-a-long-random-bootstrap-token\n",
+                encoding="utf-8",
+            )
+            with patch.object(setup, "ENV_EXAMPLE", env_example), patch.object(setup, "ENV_FILE", env_file):
+                self.assertTrue(setup.setup())
+                first = env_file.read_text(encoding="utf-8")
+                self.assertNotIn("replace-with-a-", first)
+                self.assertTrue(setup.setup())
+                self.assertEqual(env_file.read_text(encoding="utf-8"), first)
+
+    def test_ready_endpoint_and_make_targets_are_wired(self) -> None:
+        nginx = (ROOT / "docker/nginx.conf").read_text(encoding="utf-8")
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("location = /ready", nginx)
+        self.assertIn("setup:", makefile)
+        self.assertIn("lab-images:", makefile)
+        self.assertIn("up: setup lab-images", makefile)
 
 
 if __name__ == "__main__":

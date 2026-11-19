@@ -514,6 +514,40 @@ class EducationApiTests(unittest.TestCase):
         alerts = education.store.alerts(10)
         self.assertTrue(any(alert["source"] == "worker:worker-a" for alert in alerts))
 
+    def test_worker_job_progress_lease_renewal_and_cancellation(self):
+        self.client.post("/api/auth/bootstrap", json={
+            "bootstrap_token": "test-setup-secret",
+            "email": "teacher@example.test",
+            "display_name": "Teacher",
+            "password": "teacher-password-123",
+        })
+        headers = self.csrf_headers(self.client)
+        topology = load_topology(Path(__file__).parent / "topology.json")
+        education.store.register_worker("worker-a", "Docker Worker A", ["docker"])
+
+        job = education.store.enqueue_job(topology, "up", max_attempts=2)
+        claimed = education.store.claim_job("worker-a")
+        self.assertEqual(claimed["id"], job["id"])
+
+        progressed = education.store.update_job_progress(
+            job["id"], "worker-a", 45, "starting containers",
+        )
+        self.assertEqual(progressed["result"]["progress"], 45)
+        self.assertEqual(progressed["result"]["phase"], "starting containers")
+        self.assertEqual(education.store.renew_worker_leases("worker-a"), 1)
+
+        cancelled = self.client.post(
+            f"/api/execution/jobs/{job['id']}/cancel",
+            headers=headers,
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertTrue(cancelled.json()["job"]["result"]["cancelled"])
+
+        with self.assertRaises(education.EducationError):
+            education.store.update_job_progress(
+                job["id"], "worker-a", 50, "running",
+            )
+
     def test_private_api_requires_login_and_csrf(self):
         response = self.client.get("/api/topology")
         self.assertEqual(response.status_code, 401)

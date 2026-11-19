@@ -954,6 +954,68 @@ class EducationStore:
             )
             return max(0, int(result.rowcount))
 
+    def renew_worker_leases(self, worker_id: str) -> int:
+        now = time.time()
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE worker_jobs SET started_at=?,updated_at=? "
+                "WHERE status='running' AND worker_id=?",
+                (now, now, worker_id),
+            )
+            return max(0, int(result.rowcount))
+
+    def update_job_progress(
+        self,
+        job_id: str,
+        worker_id: str,
+        percent: int,
+        phase: str,
+    ) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT status,worker_id,result_json FROM worker_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                raise EducationError("job not found")
+            if row["worker_id"] != worker_id or row["status"] != "running":
+                raise EducationError("job is not currently leased by this worker")
+            result = json.loads(row["result_json"])
+            result.update({
+                "progress": max(0, min(100, int(percent))),
+                "phase": phase[:128],
+            })
+            now = time.time()
+            db.execute(
+                "UPDATE worker_jobs SET result_json=?,started_at=?,updated_at=? WHERE id=?",
+                (json.dumps(result), now, now, job_id),
+            )
+        return self.job(job_id)
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT status,result_json FROM worker_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                raise EducationError("job not found")
+            if row["status"] in {"completed", "dead", "failed"}:
+                raise EducationError("job cannot be cancelled")
+            result = json.loads(row["result_json"])
+            result.update({
+                "cancelled": True,
+                "progress": 100,
+                "phase": "cancelled",
+            })
+            now = time.time()
+            db.execute(
+                "UPDATE worker_jobs SET status='failed',worker_id=NULL,result_json=?,"
+                "updated_at=?,completed_at=? WHERE id=?",
+                (json.dumps(result), now, now, job_id),
+            )
+        return self.job(job_id)
+
     def job(self, job_id: str) -> dict[str, Any]:
         with self._connect() as db:
             row = db.execute("SELECT * FROM worker_jobs WHERE id=?", (job_id,)).fetchone()
@@ -2449,6 +2511,12 @@ class WorkerCompleteRequest(BaseModel):
     duration_ms: int = Field(default=0, ge=0, le=86_400_000)
 
 
+class WorkerProgressRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
+    percent: int = Field(default=0, ge=0, le=100)
+    phase: str = Field(default="running", max_length=128)
+
+
 class LicenseManifestRequest(BaseModel):
     license_id: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=200)
@@ -2649,6 +2717,7 @@ def worker_heartbeat(
 ) -> dict[str, Any]:
     require_worker_token(http_request)
     try:
+        store.renew_worker_leases(request.worker_id)
         worker = store.register_worker(
             request.worker_id,
             request.worker_name,
@@ -2695,6 +2764,37 @@ def worker_complete_job(
         status = 409 if "another worker" in str(exc) else 404
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     return {"job": job}
+
+
+@router.post("/execution/jobs/{job_id}/cancel")
+def cancel_worker_job(
+    job_id: str,
+    teacher: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    try:
+        return {"job": store.cancel_job(job_id)}
+    except EducationError as exc:
+        status = 409 if "cannot be cancelled" in str(exc) else 404
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@router.post("/execution/worker/jobs/{job_id}/progress")
+def worker_job_progress(
+    job_id: str,
+    request: WorkerProgressRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    require_worker_token(http_request)
+    try:
+        return {"job": store.update_job_progress(
+            job_id,
+            request.worker_id,
+            request.percent,
+            request.phase,
+        )}
+    except EducationError as exc:
+        status = 409 if "not currently leased" in str(exc) else 404
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 @router.post("/execution/licenses")

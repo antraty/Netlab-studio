@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import time
 from typing import Any, AsyncIterator, Callable
+import urllib.error
+import urllib.request
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -224,6 +226,38 @@ async def validate_browser_origin(request: Request, call_next):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "netlab-control-api"}
+
+
+@app.get("/ready")
+def readiness() -> JSONResponse:
+    checks: dict[str, str] = {}
+    status = "ready"
+    try:
+        education_module.store.user_count()
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = "error"
+        status = "degraded"
+        logger.error("Readiness database check failed: %s", exc)
+
+    worker_url = os.getenv("NETLAB_WORKER_URL", "").rstrip("/")
+    if worker_url:
+        try:
+            with urllib.request.urlopen(worker_url + "/health", timeout=3) as response:
+                checks["worker"] = "ok" if response.status == 200 else "error"
+            if checks["worker"] != "ok":
+                status = "degraded"
+        except (urllib.error.URLError, TimeoutError, OSError):
+            checks["worker"] = "error"
+            status = "degraded"
+    else:
+        checks["worker"] = "local"
+
+    payload = {"status": status, "checks": checks}
+    return JSONResponse(
+        status_code=200 if status == "ready" else 503,
+        content=payload,
+    )
 
 
 @app.get("/api/services", dependencies=[Depends(require_teacher)])
