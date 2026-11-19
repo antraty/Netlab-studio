@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 def build_orchestrator(topology: dict) -> Orchestrator:
     validate_production_topology(topology)
+    from .execution import LibvirtExecutionBackend, selected_execution_backend
+
+    if selected_execution_backend() == "libvirt":
+        return LibvirtExecutionBackend(topology)
     worker_url = os.getenv("NETLAB_WORKER_URL")
     if production_mode() and not worker_url:
         raise RuntimeError("production execution must use the isolated remote worker")
@@ -367,6 +371,12 @@ def run_laboratory_action(
     if action not in {"up", "down", "verify"}:
         raise HTTPException(status_code=404, detail="unknown action")
     laboratory = _laboratory_for_user(laboratory_id, user, write=True)
+    if action == "up":
+        try:
+            education_module.store.validate_vm_resources(laboratory["topology"], laboratory_id)
+            education_module.store.verify_license_acceptances(user["id"], laboratory["topology"])
+        except EducationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         if action == "up":
             topology = education_module.store.claim_laboratory_run(laboratory_id, user["id"])
@@ -431,6 +441,16 @@ def run_student_laboratory_action(
     if action not in {"up", "down", "verify"}:
         raise HTTPException(status_code=404, detail="unknown action")
     laboratory = _student_laboratory_for_user(assignment_id, student)
+    if action == "up":
+        try:
+            laboratory_id = laboratory["topology"].get(
+                "laboratory_id",
+                f"{assignment_id}:{student['id']}",
+            )
+            education_module.store.validate_vm_resources(laboratory["topology"], laboratory_id)
+            education_module.store.verify_license_acceptances(student["id"], laboratory["topology"])
+        except EducationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         if action == "up":
             topology = education_module.store.claim_student_laboratory_run(student["id"], assignment_id)

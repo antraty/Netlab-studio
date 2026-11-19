@@ -75,6 +75,12 @@ class Node(BaseModel):
     name: str
     image: str
     command: list[str] = Field(default_factory=lambda: ["sleep", "infinity"])
+    backend: str = "docker"
+    cpu_cores: float = Field(default=1, gt=0, le=128)
+    memory_mb: int = Field(default=512, gt=0, le=1_048_576)
+    disk_gb: int = Field(default=0, ge=0, le=10_240)
+    license_id: str | None = Field(default=None, max_length=128)
+    console: str | None = Field(default=None, max_length=32)
     position: Position = Field(default_factory=Position)
     service_id: str | None = None
     published_port: int | None = Field(default=None, ge=1, le=65535)
@@ -134,6 +140,20 @@ class Node(BaseModel):
             raise ValueError("depends_on must not contain duplicates")
         for dependency in value:
             netlab.validate_identifier(dependency, "node dependency")
+        return value
+
+    @field_validator("backend")
+    @classmethod
+    def supported_backend(cls, value: str) -> str:
+        if value not in {"docker", "libvirt"}:
+            raise ValueError("node backend must be docker or libvirt")
+        return value
+
+    @field_validator("console")
+    @classmethod
+    def supported_console(cls, value: str | None) -> str | None:
+        if value is not None and value not in {"vnc", "spice", "rdp", "ssh"}:
+            raise ValueError("console must be vnc, spice, rdp or ssh")
         return value
 
 

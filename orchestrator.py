@@ -185,7 +185,7 @@ class RemoteWorkerOrchestrator:
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": "Bearer " + self.token,
                 "X-Netlab-Worker-ID": os.getenv("NETLAB_WORKER_ID", "control-plane"),
             },
             method="POST",

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
-import time
 import threading
-from pathlib import Path
+import time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -18,29 +20,52 @@ from backend.app.security import (
     validate_production_topology,
     validate_worker_settings,
 )
-from backend.app.education import EducationStore, EducationError
 
 TOKEN = os.getenv("NETLAB_WORKER_TOKEN", "")
 WORKER_ID = os.getenv("NETLAB_WORKER_ID", "docker-worker-1").strip() or "docker-worker-1"
 WORKER_NAME = os.getenv("NETLAB_WORKER_NAME", WORKER_ID).strip() or WORKER_ID
-QUEUE_STORE = EducationStore(
-    os.getenv("NETLAB_DATABASE_URL")
-    or os.getenv("NETLAB_EDUCATION_DB")
-    or str(Path(os.getenv("NETLAB_DATA_DIR", "/tmp/netlab-worker")) / "education.sqlite3")
-)
+CONTROL_URL = os.getenv("NETLAB_CONTROL_URL", "").rstrip("/")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     validate_worker_settings()
     stop_event = threading.Event()
-    QUEUE_STORE.register_worker(WORKER_ID, WORKER_NAME, ["docker"])
+
+    def queue_request(path: str, payload: dict) -> dict | None:
+        if not CONTROL_URL:
+            return None
+        request = urllib.request.Request(
+            CONTROL_URL + path,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Netlab-Worker-Token": TOKEN,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return json.loads(response.read().decode())
+        except (urllib.error.URLError, TimeoutError, urllib.error.HTTPError):
+            return None
+
+    def heartbeat() -> None:
+        queue_request("/api/execution/worker/heartbeat", {
+            "worker_id": WORKER_ID,
+            "worker_name": WORKER_NAME,
+            "capabilities": ["docker"],
+        })
 
     def queue_poller() -> None:
         while not stop_event.wait(1):
             try:
-                QUEUE_STORE.requeue_expired_jobs()
-                job = QUEUE_STORE.claim_job(WORKER_ID)
+                heartbeat()
+                claimed = queue_request(
+                    "/api/execution/worker/jobs/claim",
+                    {"worker_id": WORKER_ID},
+                )
+                job = (claimed or {}).get("job")
                 if not job:
                     continue
                 orchestrator = DockerOrchestrator(job["topology"])
@@ -48,54 +73,52 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 try:
                     if job["action"] == "status":
                         result_payload = {
-                            "ok": True,
-                            "exit_code": 0,
-                            "output": "",
-                            "nodes": orchestrator.status(),
-                            "observability": None,
+                            "ok": True, "exit_code": 0, "output": "",
+                            "nodes": orchestrator.status(), "observability": None,
                         }
                     elif job["action"] == "observability":
                         result_payload = {
-                            "ok": True,
-                            "exit_code": 0,
-                            "output": "",
-                            "nodes": [],
-                            "observability": orchestrator.observability(),
+                            "ok": True, "exit_code": 0, "output": "",
+                            "nodes": [], "observability": orchestrator.observability(),
                         }
                     elif job["action"] == "terminal":
                         result = orchestrator.terminal(job["node_name"], job["command"])
                         result_payload = {
-                            "ok": result.ok,
-                            "exit_code": result.exit_code,
-                            "output": result.output,
-                            "nodes": [],
+                            "ok": result.ok, "exit_code": result.exit_code,
+                            "output": result.output, "nodes": [],
                             "observability": None,
                         }
                     else:
                         result = orchestrator.action(job["action"])
                         result_payload = {
-                            "ok": result.ok,
-                            "exit_code": result.exit_code,
-                            "output": result.output,
-                            "nodes": [],
+                            "ok": result.ok, "exit_code": result.exit_code,
+                            "output": result.output, "nodes": [],
                             "observability": None,
                         }
-                    QUEUE_STORE.complete_job(
-                        job["id"],
-                        WORKER_ID,
-                        result_payload["ok"],
-                        result_payload["exit_code"],
-                        result_payload["output"],
-                        result_payload["nodes"],
-                        result_payload["observability"],
-                        int((time.monotonic() - started) * 1000),
+                    queue_request(
+                        f"/api/execution/worker/jobs/{job['id']}/complete",
+                        {
+                            "worker_id": WORKER_ID,
+                            "ok": result_payload["ok"],
+                            "exit_code": result_payload["exit_code"],
+                            "output": result_payload["output"],
+                            "nodes": result_payload["nodes"],
+                            "observability": result_payload["observability"],
+                            "duration_ms": int((time.monotonic() - started) * 1000),
+                        },
                     )
                 except (RuntimeError, ValueError) as exc:
-                    QUEUE_STORE.complete_job(
-                        job["id"], WORKER_ID, False, 1, str(exc),
-                        duration_ms=int((time.monotonic() - started) * 1000),
+                    queue_request(
+                        f"/api/execution/worker/jobs/{job['id']}/complete",
+                        {
+                            "worker_id": WORKER_ID,
+                            "ok": False,
+                            "exit_code": 1,
+                            "output": str(exc),
+                            "duration_ms": int((time.monotonic() - started) * 1000),
+                        },
                     )
-            except EducationError:
+            except (KeyError, TypeError, ValueError):
                 continue
 
     poller = threading.Thread(target=queue_poller, name="netlab-worker-queue", daemon=True)
@@ -114,7 +137,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 def require_token(authorization: str | None = Header(default=None)) -> None:
     if not TOKEN:
         raise HTTPException(status_code=503, detail="worker authentication is not configured")
-    bearer = f"Bearer {TOKEN}"
+    bearer = "Bearer " + TOKEN
     if not hmac.compare_digest(authorization or "", bearer):
         raise HTTPException(status_code=401, detail="invalid worker token")
 

@@ -123,3 +123,14 @@ Le worker est exposé uniquement sur le réseau interne Compose. En production :
 5. identifier chaque worker avec `NETLAB_WORKER_ID` et `NETLAB_WORKER_NAME`.
 
 Les jobs échoués sont retentés avec un backoff borné. Les leases expirés sont remis automatiquement en file. Les laboratoires expirés sont nettoyés jusqu’à trois fois ; chaque tentative est enregistrée avec son résultat et son erreur.
+
+## Préparation KVM/libvirt
+
+Avant la tranche 5, les topologies acceptent les champs préparatoires `backend`, `cpu_cores`, `memory_mb`, `disk_gb`, `license_id` et `console`. Le backend est limité à `docker` ou `libvirt`; tout choix libvirt échoue explicitement tant que l’adaptateur VM n’est pas installé.
+
+- les limites VM sont contrôlées par laboratoire ;
+- les licences doivent être enregistrées par un administrateur ;
+- l’utilisateur doit accepter une licence active avant tout démarrage ;
+- les snapshots, sessions console et restaurations sont audités ;
+- les accès console ne deviennent disponibles qu’après authentification et autorisation du laboratoire ;
+- aucun accès VNC, SPICE, RDP ou SSH n’est rendu disponible par défaut.

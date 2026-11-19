@@ -34,6 +34,7 @@ services:
       NETLAB_DATABASE_URL: postgresql://${POSTGRES_USER:-netlab}:${POSTGRES_PASSWORD:-netlab-development-only}@db:5432/${POSTGRES_DB:-netlab}?sslmode=disable
       NETLAB_WORKER_ID: ${NETLAB_WORKER_ID:-docker-worker-1}
       NETLAB_WORKER_NAME: ${NETLAB_WORKER_NAME:-Docker worker 1}
+      NETLAB_CONTROL_URL: http://control:8000
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

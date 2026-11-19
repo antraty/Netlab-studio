@@ -373,6 +373,12 @@ La tranche 4 persiste les jobs dans PostgreSQL ou SQLite selon la configuration 
 
 Le worker peut utiliser un certificat HTTPS/mTLS côté serveur et le plan de contrôle peut présenter son propre certificat client. Les variables `NETLAB_MTLS_*` sont documentées dans `.env.example` et dans `DEPLOYMENT.md`. La reprise des laboratoires expirés effectue jusqu’à trois tentatives de nettoyage avant de conserver une alerte persistante.
 
+## Préparation à l’exécution VM
+
+Le modèle de nœud accepte désormais `backend=docker|libvirt`, des limites `cpu_cores`, `memory_mb` et `disk_gb`, un identifiant de licence et un type de console. Ces champs sont validés avant le déploiement et enregistrés avec les quotas du laboratoire.
+
+L’adaptateur libvirt reste volontairement bloqué avec un message explicite. Les manifestes de licences, acceptations utilisateur, snapshots et audits d’ouverture/fermeture de console sont persistés. Cette base prépare la tranche 5 sans exposer encore de socket KVM, pfSense, CHR ou Active Directory.
+
 Cette phase est maintenant complète pour le flux pédagogique local. Les opérations du worker distant restent synchrones et la haute disponibilité des workers n’est pas garantie ; le projet ne doit pas être exposé publiquement avant durcissement et revue de sécurité.
 
 ### Phase 5 — première tranche : DNS CoreDNS

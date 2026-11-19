@@ -69,7 +69,8 @@ class OrchestratorTests(unittest.TestCase):
                     denied = client.post("/v1/jobs", json=payload)
                     self.assertEqual(denied.status_code, 401)
                     response = client.post(
-                        "/v1/jobs", json=payload,
+                        "/v1/jobs",
+                        json=payload,
                         headers={"Authorization": "Bearer test-observability-token"},
                     )
                     self.assertEqual(response.status_code, 200, response.text)
@@ -77,7 +78,3 @@ class OrchestratorTests(unittest.TestCase):
                     observe.assert_called_once_with()
         finally:
             worker_main.TOKEN = previous
-
-
-if __name__ == "__main__":
-    unittest.main()

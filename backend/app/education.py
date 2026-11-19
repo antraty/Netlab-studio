@@ -290,6 +290,53 @@ class EducationStore:
                     created_at DOUBLE PRECISION NOT NULL,
                     updated_at DOUBLE PRECISION NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS execution_resources (
+                    id TEXT PRIMARY KEY,
+                    laboratory_id TEXT NOT NULL,
+                    node_name TEXT NOT NULL,
+                    backend TEXT NOT NULL CHECK (backend IN ('docker','libvirt')),
+                    cpu_cores DOUBLE PRECISION NOT NULL,
+                    memory_mb INTEGER NOT NULL,
+                    disk_gb INTEGER NOT NULL,
+                    license_id TEXT,
+                    created_at DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS license_manifests (
+                    id TEXT PRIMARY KEY,
+                    license_id TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    owner TEXT NOT NULL,
+                    license_url TEXT NOT NULL,
+                    sha256 TEXT,
+                    expires_at DOUBLE PRECISION,
+                    requires_acceptance INTEGER NOT NULL DEFAULT 1,
+                    created_at DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS license_acceptances (
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    license_id TEXT NOT NULL,
+                    accepted_at DOUBLE PRECISION NOT NULL,
+                    PRIMARY KEY (user_id, license_id)
+                );
+                CREATE TABLE IF NOT EXISTS execution_snapshots (
+                    id TEXT PRIMARY KEY,
+                    laboratory_id TEXT NOT NULL,
+                    node_name TEXT NOT NULL,
+                    snapshot_name TEXT NOT NULL,
+                    backend TEXT NOT NULL CHECK (backend IN ('docker','libvirt')),
+                    status TEXT NOT NULL CHECK (status IN ('pending','available','failed')),
+                    created_at DOUBLE PRECISION NOT NULL,
+                    restored_at DOUBLE PRECISION
+                );
+                CREATE TABLE IF NOT EXISTS console_audit (
+                    id TEXT PRIMARY KEY,
+                    laboratory_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    node_name TEXT NOT NULL,
+                    console TEXT NOT NULL,
+                    opened_at DOUBLE PRECISION NOT NULL,
+                    closed_at DOUBLE PRECISION
+                );
                 CREATE TABLE IF NOT EXISTS groups (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -395,6 +442,10 @@ class EducationStore:
                 CREATE INDEX IF NOT EXISTS idx_laboratory_versions_lab ON laboratory_versions(laboratory_id, version);
                 CREATE INDEX IF NOT EXISTS idx_laboratory_members_user ON laboratory_members(user_id);
                 CREATE INDEX IF NOT EXISTS idx_laboratory_events_lab ON laboratory_events(laboratory_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_execution_resources_lab ON execution_resources(laboratory_id);
+                CREATE INDEX IF NOT EXISTS idx_license_acceptances_user ON license_acceptances(user_id, license_id);
+                CREATE INDEX IF NOT EXISTS idx_execution_snapshots_lab ON execution_snapshots(laboratory_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_console_audit_lab ON console_audit(laboratory_id, opened_at);
                 """
             )
             if db.postgres:
@@ -985,6 +1036,236 @@ class EducationStore:
             "status": "succeeded" if succeeded else "failed",
         }
 
+    def validate_vm_resources(
+        self,
+        topology: dict[str, Any],
+        laboratory_id: str,
+    ) -> dict[str, Any]:
+        cpu_limit = self._quota_float("NETLAB_MAX_LIBVIRT_CPU_CORES_PER_LAB", 8, 128)
+        memory_limit = self._quota("NETLAB_MAX_LIBVIRT_MEMORY_MB_PER_LAB", 16384, 1_048_576)
+        disk_limit = self._quota("NETLAB_MAX_LIBVIRT_DISK_GB_PER_LAB", 200, 10_240)
+        cpu = 0.0
+        memory = 0
+        disk = 0
+        records = []
+        for node in topology.get("nodes", []):
+            if node.get("backend", "docker") != "libvirt":
+                continue
+            cpu += float(node.get("cpu_cores", 1))
+            memory += int(node.get("memory_mb", 512))
+            disk += int(node.get("disk_gb", 0))
+            license_id = node.get("license_id")
+            if license_id:
+                records.append({"node": node["name"], "license_id": license_id})
+        if cpu > cpu_limit:
+            raise EducationError(f"VM laboratory exceeds the {cpu_limit:g}-CPU libvirt quota")
+        if memory > memory_limit:
+            raise EducationError(f"VM laboratory exceeds the {memory_limit}-MB libvirt memory quota")
+        if disk > disk_limit:
+            raise EducationError(f"VM laboratory exceeds the {disk_limit}-GB libvirt disk quota")
+        now = time.time()
+        with self._connect() as db:
+            db.execute("DELETE FROM execution_resources WHERE laboratory_id=?", (laboratory_id,))
+            for node in topology.get("nodes", []):
+                if node.get("backend", "docker") == "libvirt":
+                    db.execute(
+                        "INSERT INTO execution_resources("
+                        "id,laboratory_id,node_name,backend,cpu_cores,memory_mb,disk_gb,license_id,created_at"
+                        ") VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            str(uuid.uuid4()),
+                            laboratory_id,
+                            node["name"],
+                            "libvirt",
+                            float(node.get("cpu_cores", 1)),
+                            int(node.get("memory_mb", 512)),
+                            int(node.get("disk_gb", 0)),
+                            node.get("license_id"),
+                            now,
+                        ),
+                    )
+        return {
+            "cpu_cores": cpu,
+            "memory_mb": memory,
+            "disk_gb": disk,
+            "licenses": records,
+        }
+
+    def register_license(
+        self,
+        license_id: str,
+        title: str,
+        owner: str,
+        license_url: str,
+        sha256: str | None = None,
+        expires_at: float | None = None,
+    ) -> dict[str, Any]:
+        license_id = license_id.strip()
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", license_id):
+            raise EducationError("license id is invalid")
+        if not title.strip() or len(title) > 200:
+            raise EducationError("license title must contain 1 to 200 characters")
+        if len(owner) > 200 or len(license_url) > 2048:
+            raise EducationError("license metadata is too long")
+        if sha256 is not None and not re.fullmatch(r"[a-fA-F0-9]{64}", sha256):
+            raise EducationError("license sha256 must be 64 hexadecimal characters")
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO license_manifests("
+                "id,license_id,title,owner,license_url,sha256,expires_at,requires_acceptance,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(license_id) DO UPDATE SET title=excluded.title,owner=excluded.owner,"
+                "license_url=excluded.license_url,sha256=excluded.sha256,"
+                "expires_at=excluded.expires_at,requires_acceptance=1",
+                (
+                    str(uuid.uuid4()),
+                    license_id,
+                    title.strip(),
+                    owner.strip(),
+                    license_url.strip(),
+                    sha256.lower() if sha256 else None,
+                    expires_at,
+                    1,
+                    now,
+                ),
+            )
+        return self.license(license_id)
+
+    def license(self, license_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT license_id,title,owner,license_url,sha256,expires_at,"
+                "requires_acceptance,created_at FROM license_manifests WHERE license_id=?",
+                (license_id,),
+            ).fetchone()
+        if not row:
+            raise EducationError("license manifest not found")
+        return dict(row)
+
+    def accept_license(self, user_id: str, license_id: str) -> None:
+        manifest = self.license(license_id)
+        if manifest["expires_at"] is not None and float(manifest["expires_at"]) <= time.time():
+            raise EducationError("license manifest has expired")
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO license_acceptances(user_id,license_id,accepted_at) VALUES(?,?,?) "
+                "ON CONFLICT(user_id,license_id) DO UPDATE SET accepted_at=excluded.accepted_at",
+                (user_id, license_id, time.time()),
+            )
+
+    def verify_license_acceptances(self, user_id: str, topology: dict[str, Any]) -> None:
+        license_ids = {
+            node["license_id"]
+            for node in topology.get("nodes", [])
+            if node.get("backend", "docker") == "libvirt" and node.get("license_id")
+        }
+        with self._connect() as db:
+            for license_id in license_ids:
+                manifest = db.execute(
+                    "SELECT expires_at FROM license_manifests WHERE license_id=?",
+                    (license_id,),
+                ).fetchone()
+                if not manifest:
+                    raise EducationError(f"license manifest is missing: {license_id}")
+                if manifest["expires_at"] is not None and float(manifest["expires_at"]) <= time.time():
+                    raise EducationError(f"license manifest has expired: {license_id}")
+                accepted = db.execute(
+                    "SELECT 1 FROM license_acceptances WHERE user_id=? AND license_id=?",
+                    (user_id, license_id),
+                ).fetchone()
+                if not accepted:
+                    raise EducationError(f"license acceptance is required: {license_id}")
+
+    def create_snapshot(
+        self,
+        laboratory_id: str,
+        node_name: str,
+        snapshot_name: str,
+        backend: str = "libvirt",
+    ) -> dict[str, Any]:
+        snapshot_name = snapshot_name.strip()
+        if backend not in {"docker", "libvirt"}:
+            raise EducationError("invalid snapshot backend")
+        if not snapshot_name or len(snapshot_name) > 128:
+            raise EducationError("snapshot name must contain 1 to 128 characters")
+        snapshot_id = str(uuid.uuid4())
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO execution_snapshots("
+                "id,laboratory_id,node_name,snapshot_name,backend,status,created_at,restored_at"
+                ") VALUES(?,?,?,?,?,?,?,NULL)",
+                (
+                    snapshot_id,
+                    laboratory_id,
+                    node_name,
+                    snapshot_name,
+                    backend,
+                    "pending",
+                    now,
+                ),
+            )
+        return {"id": snapshot_id, "laboratory_id": laboratory_id, "node_name": node_name,
+                "snapshot_name": snapshot_name, "backend": backend, "status": "pending"}
+
+    def set_snapshot_status(self, snapshot_id: str, status: str) -> dict[str, Any]:
+        if status not in {"available", "failed"}:
+            raise EducationError("invalid snapshot status")
+        with self._connect() as db:
+            now = time.time()
+            db.execute(
+                "UPDATE execution_snapshots SET status=?,restored_at=? WHERE id=?",
+                (status, now if status == "available" else None, snapshot_id),
+            )
+            row = db.execute(
+                "SELECT id,laboratory_id,node_name,snapshot_name,backend,status,created_at,restored_at "
+                "FROM execution_snapshots WHERE id=?",
+                (snapshot_id,),
+            ).fetchone()
+        if not row:
+            raise EducationError("snapshot not found")
+        return dict(row)
+
+    def snapshots(self, laboratory_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id,laboratory_id,node_name,snapshot_name,backend,status,created_at,restored_at "
+                "FROM execution_snapshots WHERE laboratory_id=? ORDER BY created_at DESC",
+                (laboratory_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def open_console(
+        self,
+        laboratory_id: str,
+        user_id: str,
+        node_name: str,
+        console: str,
+    ) -> dict[str, Any]:
+        if console not in {"vnc", "spice", "rdp", "ssh"}:
+            raise EducationError("unsupported console type")
+        audit_id = str(uuid.uuid4())
+        now = time.time()
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO console_audit("
+                "id,laboratory_id,user_id,node_name,console,opened_at,closed_at"
+                ") VALUES(?,?,?,?,?,?,NULL)",
+                (audit_id, laboratory_id, user_id, node_name, console, now),
+            )
+        return {"id": audit_id, "laboratory_id": laboratory_id, "node_name": node_name,
+                "console": console, "opened_at": now}
+
+    def close_console(self, audit_id: str, user_id: str) -> None:
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE console_audit SET closed_at=? WHERE id=? AND user_id=? AND closed_at IS NULL",
+                (time.time(), audit_id, user_id),
+            )
+            if result.rowcount == 0:
+                raise EducationError("console session not found")
+
     def change_password(self, user_id: str, old_password: str, new_password: str) -> None:
         new_password = _password(new_password)
         with self._connect() as db:
@@ -1059,6 +1340,7 @@ class EducationStore:
             netlab.validate_topology(topology)
         except netlab.TopologyError as exc:
             raise EducationError(f"invalid laboratory identifier: {exc}") from exc
+        self.validate_vm_resources(topology, laboratory_id)
         now = time.time()
         expires_at = now + ttl_hours * 3600
         try:
@@ -2147,6 +2429,50 @@ class WorkerJobRequest(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=10)
 
 
+class WorkerHeartbeatRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
+    worker_name: str = Field(min_length=1, max_length=128)
+    capabilities: list[str] = Field(default_factory=lambda: ["docker"], max_length=32)
+
+
+class WorkerClaimRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
+
+
+class WorkerCompleteRequest(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=128)
+    ok: bool
+    exit_code: int = Field(default=0, ge=0, le=255)
+    output: str = Field(default="", max_length=65536)
+    nodes: list[dict[str, str]] = Field(default_factory=list, max_length=500)
+    observability: dict[str, Any] | None = None
+    duration_ms: int = Field(default=0, ge=0, le=86_400_000)
+
+
+class LicenseManifestRequest(BaseModel):
+    license_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=200)
+    owner: str = Field(max_length=200)
+    license_url: str = Field(min_length=1, max_length=2048)
+    sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    expires_at: float | None = None
+
+
+class LicenseAcceptanceRequest(BaseModel):
+    license_id: str = Field(min_length=1, max_length=128)
+
+
+class SnapshotRequest(BaseModel):
+    node_name: str = Field(min_length=1, max_length=128)
+    snapshot_name: str = Field(min_length=1, max_length=128)
+    backend: str = "libvirt"
+
+
+class ConsoleOpenRequest(BaseModel):
+    node_name: str = Field(min_length=1, max_length=128)
+    console: str
+
+
 def require_user(request: Request) -> dict[str, str]:
     user = store.session_user(request.cookies.get(SESSION_COOKIE))
     if not user:
@@ -2307,6 +2633,174 @@ def get_execution_alerts(
     teacher: dict[str, str] = Depends(require_teacher),
 ) -> dict[str, Any]:
     return {"alerts": store.alerts(limit)}
+
+
+def require_worker_token(request: Request) -> None:
+    expected = os.getenv("NETLAB_WORKER_TOKEN", "")
+    supplied = request.headers.get("x-netlab-worker-token", "")
+    if not expected or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+
+
+@router.post("/execution/worker/heartbeat")
+def worker_heartbeat(
+    request: WorkerHeartbeatRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    require_worker_token(http_request)
+    try:
+        worker = store.register_worker(
+            request.worker_id,
+            request.worker_name,
+            request.capabilities,
+        )
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"worker": worker}
+
+
+@router.post("/execution/worker/jobs/claim")
+def worker_claim_job(
+    request: WorkerClaimRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    require_worker_token(http_request)
+    store.requeue_expired_jobs()
+    try:
+        job = store.claim_job(request.worker_id)
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"job": job}
+
+
+@router.post("/execution/worker/jobs/{job_id}/complete")
+def worker_complete_job(
+    job_id: str,
+    request: WorkerCompleteRequest,
+    http_request: Request,
+) -> dict[str, Any]:
+    require_worker_token(http_request)
+    try:
+        job = store.complete_job(
+            job_id,
+            request.worker_id,
+            request.ok,
+            request.exit_code,
+            request.output,
+            request.nodes,
+            request.observability,
+            request.duration_ms,
+        )
+    except EducationError as exc:
+        status = 409 if "another worker" in str(exc) else 404
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return {"job": job}
+
+
+@router.post("/execution/licenses")
+def register_execution_license(
+    request: LicenseManifestRequest,
+    user: dict[str, str] = Depends(require_teacher),
+) -> dict[str, Any]:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="administrator role required")
+    try:
+        manifest = store.register_license(
+            request.license_id,
+            request.title,
+            request.owner,
+            request.license_url,
+            request.sha256,
+            request.expires_at,
+        )
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"license": manifest}
+
+
+@router.post("/execution/licenses/accept")
+def accept_execution_license(
+    request: LicenseAcceptanceRequest,
+    user: dict[str, str] = Depends(require_user),
+) -> dict[str, bool]:
+    try:
+        store.accept_license(user["id"], request.license_id)
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.get("/laboratories/{laboratory_id}/snapshots")
+def list_execution_snapshots(
+    laboratory_id: str,
+    user: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    if not store.laboratory(laboratory_id, user["id"]):
+        raise HTTPException(status_code=404, detail="laboratory not found")
+    return {"snapshots": store.snapshots(laboratory_id)}
+
+
+@router.post("/laboratories/{laboratory_id}/snapshots", status_code=201)
+def create_execution_snapshot(
+    laboratory_id: str,
+    request: SnapshotRequest,
+    user: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    laboratory = store.laboratory(laboratory_id, user["id"])
+    if not laboratory:
+        raise HTTPException(status_code=404, detail="laboratory not found")
+    if laboratory["role"] == "viewer":
+        raise HTTPException(status_code=403, detail="laboratory is read-only")
+    try:
+        snapshot = store.create_snapshot(
+            laboratory_id,
+            request.node_name,
+            request.snapshot_name,
+            request.backend,
+        )
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"snapshot": snapshot}
+
+
+@router.post("/laboratories/{laboratory_id}/console/open")
+def open_execution_console(
+    laboratory_id: str,
+    request: ConsoleOpenRequest,
+    user: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    laboratory = store.laboratory(laboratory_id, user["id"])
+    if not laboratory:
+        raise HTTPException(status_code=404, detail="laboratory not found")
+    topology = laboratory["topology"]
+    node = next((node for node in topology["nodes"] if node["name"] == request.node_name), None)
+    if not node or node.get("backend", "docker") != "libvirt":
+        raise HTTPException(status_code=404, detail="libvirt console node not found")
+    if node.get("console") and node["console"] != request.console:
+        raise HTTPException(status_code=400, detail="console type is not enabled for this node")
+    try:
+        session = store.open_console(
+            laboratory_id,
+            user["id"],
+            request.node_name,
+            request.console,
+        )
+    except EducationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"session": session}
+
+
+@router.post("/laboratories/{laboratory_id}/console/{session_id}/close")
+def close_execution_console(
+    laboratory_id: str,
+    session_id: str,
+    user: dict[str, str] = Depends(require_user),
+) -> dict[str, bool]:
+    try:
+        store.close_console(session_id, user["id"])
+    except EducationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @router.post("/auth/login")
