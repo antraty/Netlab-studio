@@ -61,6 +61,9 @@ const assignmentInstructions = ref('')
 const assignmentCriteriaDraft = ref('')
 const selectedGroupId = ref('')
 const busy = ref(false)
+const operationBusy = ref('')
+const undoStack = ref<Topology[]>([])
+const redoStack = ref<Topology[]>([])
 const observability = ref<ObservabilitySnapshot | null>(null)
 const observabilityLoading = ref(false)
 const observabilityError = ref('')
@@ -149,6 +152,29 @@ const labTemplates: Array<{ id: string; label: string; description: string; topo
 ]
 function nodeStatus(name: string) { return statuses.value.find(node => node.name === name)?.state ?? 'inconnu' }
 function showError(error: unknown) { pageError.value = error instanceof Error ? error.message : 'Erreur inconnue' }
+
+function captureTopologyHistory() {
+  if (!topology.value) return
+  undoStack.value.push(structuredClone(topology.value))
+  if (undoStack.value.length > 50) undoStack.value.shift()
+  redoStack.value = []
+}
+
+function undoTopology() {
+  if (!topology.value || !undoStack.value.length) return
+  redoStack.value.push(structuredClone(topology.value))
+  topology.value = undoStack.value.pop() ?? topology.value
+  dirty.value = true
+  terminalOutput.value = 'Dernière modification annulée.'
+}
+
+function redoTopology() {
+  if (!topology.value || !redoStack.value.length) return
+  undoStack.value.push(structuredClone(topology.value))
+  topology.value = redoStack.value.pop() ?? topology.value
+  dirty.value = true
+  terminalOutput.value = 'Modification rétablie.'
+}
 
 async function initialize() {
   pageError.value = ''
@@ -486,6 +512,7 @@ function connectTerminal(nodeName: string) {
 }
 function removeSelected() {
   if (!topology.value || !selected.value) return
+  captureTopologyHistory()
   topology.value.nodes = topology.value.nodes.filter(node => node.name !== selected.value)
   topology.value.links = topology.value.links.filter(link => link.from !== selected.value && link.to !== selected.value)
   selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = true
@@ -496,6 +523,7 @@ function addNetwork() {
   const subnet = window.prompt('Sous-réseau IPv4 CIDR :', `10.0.${(topology.value.networks?.length ?? 0) + 1}.0/24`)
   if (!name || !subnet) return
   if (topology.value.networks?.some(network => network.name === name)) { pageError.value = 'Ce segment existe déjà.'; return }
+  captureTopologyHistory()
   topology.value.networks ??= []
   topology.value.networks.push({ name, driver: 'bridge', subnet })
   dirty.value = true
@@ -506,6 +534,7 @@ function removeNetwork(networkName: string) {
     pageError.value = 'Impossible de supprimer un segment encore utilisé par une interface.'
     return
   }
+  captureTopologyHistory()
   topology.value.networks = topology.value.networks.filter(network => network.name !== networkName)
   dirty.value = true
 }
@@ -559,6 +588,7 @@ function applyTemplate() {
   const template = labTemplates.find(item => item.id === selectedTemplateId.value)
   if (!template) return
   if (dirty.value && !window.confirm('Remplacer la topologie actuelle et perdre les modifications non sauvegardées ?')) return
+  captureTopologyHistory()
   topology.value = structuredClone(template.topology)
   selected.value = topology.value.nodes[0]?.name ?? null
   dirty.value = true
@@ -571,6 +601,7 @@ function addNode() {
   const name = window.prompt('Nom du nœud :', `linux-node-${topology.value.nodes.length + 1}`)
   const image = window.prompt('Image Docker :', 'ubuntu:24.04')
   if (!name || !image || topology.value.nodes.some(node => node.name === name)) return
+  captureTopologyHistory()
   const node: Node = { name, image, command: ['sleep', 'infinity'], position: { x: 60 + topology.value.nodes.length * 210, y: 110 }, environment: {}, secret_refs: {}, depends_on: [] }
   if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   topology.value.nodes.push(node)
@@ -583,6 +614,7 @@ function addCatalogService() {
   const name = window.prompt('Nom du nœud :', `${profile.id}-${topology.value.nodes.length + 1}`)
   if (!name) return
   if (topology.value.nodes.some(node => node.name === name)) { pageError.value = 'Ce nom de nœud existe déjà.'; return }
+  captureTopologyHistory()
   let publishedPort: number | undefined
   if (profile.primary_port) {
     const rawPort = window.prompt(`Port hôte facultatif lié seulement à 127.0.0.1 (port du conteneur ${profile.primary_port}). Vide = réseau Docker uniquement.`, '')
@@ -635,6 +667,7 @@ function point(event: PointerEvent) {
 }
 function dragNode(event: PointerEvent, node: Node) {
   if (linkMode.value) { selectNode(node); return }
+  captureTopologyHistory()
   const start = point(event); const offset = { x: start.x - node.position.x, y: start.y - node.position.y }
   const move = (moveEvent: PointerEvent) => { const next = point(moveEvent); node.position = { x: Math.max(10, Math.min(590, next.x - offset.x)), y: Math.max(10, Math.min(260, next.y - offset.y)) }; dirty.value = true }
   const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop) }
@@ -701,8 +734,34 @@ function topologyReady() {
   pageError.value = `Topologie invalide : ${topologyIssues.value[0]}`
   return false
 }
-async function action(name: 'up' | 'down' | 'verify') { if (!activeLaboratoryId.value) return; if (!canModifyLaboratory.value) { pageError.value = 'Ce laboratoire est en lecture seule.'; return }; try { if (name !== 'down' && !topologyReady()) return; const result = await api.laboratoryAction(activeLaboratoryId.value, name); terminalOutput.value = result.output || (result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`); await refresh(false) } catch (error) { showError(error) } }
-async function save() { if (!topology.value || !topologyReady() || !activeLaboratoryId.value) return; if (!canModifyLaboratory.value) { pageError.value = 'Ce laboratoire est en lecture seule.'; return }; try { const result = await api.saveLaboratory(activeLaboratoryId.value, topology.value); topology.value = result.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
+async function action(name: 'up' | 'down' | 'verify') {
+  if (!activeLaboratoryId.value) return
+  if (!canModifyLaboratory.value) { pageError.value = 'Ce laboratoire est en lecture seule.'; return }
+  if (operationBusy.value) return
+  operationBusy.value = name
+  try {
+    if (name !== 'down' && !topologyReady()) return
+    const result = await api.laboratoryAction(activeLaboratoryId.value, name)
+    terminalOutput.value = result.output || (result.ok ? `${name}: terminé` : `${name}: échec (code ${result.exit_code})`)
+    await refresh(false)
+  } catch (error) { showError(error) }
+  finally { operationBusy.value = '' }
+}
+async function save() {
+  if (!topology.value || !topologyReady() || !activeLaboratoryId.value) return
+  if (!canModifyLaboratory.value) { pageError.value = 'Ce laboratoire est en lecture seule.'; return }
+  if (operationBusy.value) return
+  operationBusy.value = 'save'
+  try {
+    const result = await api.saveLaboratory(activeLaboratoryId.value, topology.value)
+    topology.value = result.topology
+    dirty.value = false
+    undoStack.value = []
+    redoStack.value = []
+    await refresh(false)
+  } catch (error) { showError(error) }
+  finally { operationBusy.value = '' }
+}
 async function restore() { if (!activeLaboratoryId.value || !versions.value.length) return; const raw = window.prompt(`Version à restaurer (${versions.value.map(version => version.version).join(', ')})`, String(versions.value[0].version)); const version = Number(raw); if (!Number.isInteger(version)) return; try { const response = await api.restoreLaboratory(activeLaboratoryId.value, version); topology.value = response.topology; dirty.value = false; await refresh(false) } catch (error) { showError(error) } }
 async function cloneLab() { await createLaboratory() }
 async function shareLaboratory() {
@@ -718,8 +777,25 @@ async function exportLab() { if (!topology.value || !activeLaboratoryId.value) r
 async function importLab(event: Event) { const input = event.target as HTMLInputElement; const file = input.files?.[0]; if (!file) return; try { const payload = JSON.parse(await file.text()) as Topology | { topology: Topology }; const imported = 'topology' in payload ? payload.topology : payload; delete imported.laboratory_id; const response = await api.createLaboratory(imported); await loadLaboratories(); activeLaboratoryId.value = response.laboratory.id; topology.value = response.topology; selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = false; terminalOutput.value = `laboratoire importé : ${topology.value.lab}`; await refresh(false) } catch (error) { showError(error) } finally { input.value = '' } }
 async function runTerminal() { const socket = terminalSocket.value; const command = terminalCommand.value.trim(); if (!socket || socket.readyState !== WebSocket.OPEN || !command) { terminalOutput.value = 'Sélectionnez un nœud avec Docker actif.'; return }; socket.send(command); terminalCommand.value = '' }
 
-onMounted(async () => { await initialize() })
-onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTimer) window.clearInterval(observabilityTimer); if (observabilityCooldownTimer) window.clearTimeout(observabilityCooldownTimer); terminalSocket.value?.close() })
+function handleEditorShortcut(event: KeyboardEvent) {
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
+  event.preventDefault()
+  if (event.shiftKey) redoTopology()
+  else undoTopology()
+}
+
+onMounted(async () => {
+  window.addEventListener('keydown', handleEditorShortcut)
+  await initialize()
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleEditorShortcut)
+  if (timer) window.clearInterval(timer)
+  if (observabilityTimer) window.clearInterval(observabilityTimer)
+  if (observabilityCooldownTimer) window.clearTimeout(observabilityCooldownTimer)
+  terminalSocket.value?.close()
+})
 </script>
 
 <template>
@@ -835,7 +911,22 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); if (observabilityTim
     <main>
       <p v-if="pageError" class="notice">{{ pageError }}<button class="notice-close" @click="pageError = ''">×</button></p>
       <template v-if="topology">
-      <section class="toolbar"><button :disabled="!canModifyLaboratory" @click="action('up')">Déployer</button><button class="secondary" :disabled="!canModifyLaboratory" @click="action('verify')">Tester la connectivité</button><button class="danger" :disabled="!canModifyLaboratory" @click="action('down')">Arrêter</button><button class="secondary" :disabled="!canModifyLaboratory" @click="save">Nouvelle version</button><button class="secondary" :disabled="!canModifyLaboratory" @click="restore">Restaurer</button><button class="secondary" @click="cloneLab">Cloner</button><button v-if="ownsLaboratory" class="secondary" @click="shareLaboratory">Partager</button><button class="secondary" @click="exportLab">Exporter</button><label v-if="canModifyLaboratory" class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label><select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select><button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button></section>
+      <section class="toolbar">
+        <button :disabled="!canModifyLaboratory || Boolean(operationBusy)" @click="action('up')">{{ operationBusy === 'up' ? 'Déploiement…' : 'Déployer' }}</button>
+        <button class="secondary" :disabled="!canModifyLaboratory || Boolean(operationBusy)" @click="action('verify')">{{ operationBusy === 'verify' ? 'Test en cours…' : 'Tester la connectivité' }}</button>
+        <button class="danger" :disabled="!canModifyLaboratory || Boolean(operationBusy)" @click="action('down')">{{ operationBusy === 'down' ? 'Arrêt…' : 'Arrêter' }}</button>
+        <button class="secondary" :disabled="!canModifyLaboratory || Boolean(operationBusy)" @click="save">{{ operationBusy === 'save' ? 'Enregistrement…' : 'Nouvelle version' }}</button>
+        <button class="secondary" :disabled="!canModifyLaboratory || Boolean(operationBusy)" @click="restore">Restaurer</button>
+        <button class="secondary" :disabled="!undoStack.length" @click="undoTopology" title="Ctrl/Cmd+Z">Annuler</button>
+        <button class="secondary" :disabled="!redoStack.length" @click="redoTopology" title="Ctrl/Cmd+Maj+Z">Rétablir</button>
+        <button class="secondary" @click="cloneLab">Cloner</button>
+        <button v-if="ownsLaboratory" class="secondary" @click="shareLaboratory">Partager</button>
+        <button class="secondary" @click="exportLab">Exporter</button>
+        <label v-if="canModifyLaboratory" class="file-button secondary">Importer<input type="file" accept="application/json,.json" @change="importLab" /></label>
+        <select v-model="selectedTemplateId" class="template-select" aria-label="Modèle de laboratoire"><option v-for="template in labTemplates" :key="template.id" :value="template.id">{{ template.label }}</option></select>
+        <button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button>
+        <span v-if="operationBusy" class="operation-status" role="status">Opération en cours…</span>
+      </section>
       <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Profils disponibles : Nginx, Apache, CoreDNS, PostgreSQL, MySQL et MongoDB. Les bases utilisent des volumes persistants et des secrets référencés hors topologie. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
