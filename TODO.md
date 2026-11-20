@@ -60,3 +60,61 @@
 - [x] Ajouter PostgreSQL, MySQL et MongoDB avec secrets hors topologie et volumes persistants.
 - [ ] Ajouter WordPress, Jenkins, GitLab et Laravel avec dépendances, limites de ressources, volumes et images épinglées.
 - [ ] Évaluer pfSense, MikroTik CHR et Windows Server/Active Directory sur un moteur VM/KVM avec validation de licences.
+
+
+# Feuille de route de finalisation et présentation publique
+
+## Priorité A — stabiliser l’expérience pédagogique Docker
+
+- [ ] Remplacer les badges textuels de la palette par des pictogrammes SVG et représenter visuellement les switches et segments réseau.
+- [ ] Permettre la sélection, la modification et la suppression individuelle des câbles, avec erreurs visibles sur câbles, ports et segments.
+- [ ] Finaliser les exercices structurés avec objectifs, étapes, indices progressifs et niveaux d’aide.
+- [ ] Déplacer l’évaluation des critères de réussite vers le backend et l’environnement réellement déployé.
+- [ ] Ajouter des tests automatiques détaillés, des résultats structurés et une correction pédagogique.
+- [ ] Ajouter des modèles complets pour IP, routage statique, VLAN, inter-VLAN, DNS, DHCP, firewall et services.
+- [ ] Ajouter la visualisation animée du chemin réel d’un paquet lorsque les données d’exécution le permettent.
+
+## Priorité B — industrialiser l’exécution distante
+
+- [ ] Compléter la file de tâches, les leases, heartbeats, reprises et échecs définitifs.
+- [ ] Gérer plusieurs workers distribués avec stockage partagé durable pour les données de laboratoires.
+- [ ] Tester les pannes du control plane, du worker, du réseau et de la base.
+- [ ] Tester la charge, la montée en charge, les déploiements concurrents, les expirations et les nettoyages.
+- [ ] Définir et tester les objectifs RPO/RTO ainsi que la récupération après incident.
+
+## Priorité C — élargir les services et environnements
+
+- [ ] Finaliser DHCP/dnsmasq.
+- [ ] Finaliser PostgreSQL, MySQL et MongoDB avec volumes, secrets, healthchecks et restauration.
+- [ ] Intégrer Jenkins, GitLab, WordPress et Laravel avec dépendances et limites dédiées.
+- [ ] Épingler les images par digest et contrôler leur provenance dans un registre maîtrisé.
+- [ ] Intégrer libvirt/KVM puis étudier pfSense, MikroTik, Windows Server et Active Directory sous réserve des licences.
+
+## Priorité D — supervision et assistance
+
+- [ ] Historiser les métriques et afficher des graphiques temporels.
+- [ ] Ajouter les alertes externes, notifications et quotas agrégés par utilisateur/laboratoire.
+- [ ] Superviser les workers, jobs, bases et files d’exécution.
+- [ ] Construire une assistance intelligente explicable basée sur la topologie, les routes, les logs et les états.
+- [ ] Garantir que l’assistance ne modifie jamais silencieusement le réseau ou la topologie.
+
+## Pré-requis avant preview publique contrôlée
+
+- [ ] Définir clairement le périmètre expérimental et n’utiliser aucune donnée sensible réelle.
+- [ ] Servir l’application derrière HTTPS avec cookies sécurisés, origines et hôtes autorisés.
+- [ ] Stocker les secrets dans un gestionnaire dédié et activer la limitation de débit.
+- [ ] Garder le socket Docker exclusivement sur un worker privé et utiliser mTLS control plane/worker.
+- [ ] Appliquer des quotas stricts, des expirations et un nettoyage vérifiable des ressources.
+- [ ] Tester les sauvegardes et la restauration complète.
+- [ ] Limiter la preview aux images, scénarios et profils réellement maîtrisés.
+- [ ] Préparer un plan d’arrêt d’urgence et une procédure d’incident.
+
+## Pré-requis avant production publique
+
+- [ ] Réaliser une revue de sécurité indépendante et des tests d’intrusion autorisés.
+- [ ] Valider l’isolation entre laboratoires, utilisateurs et copies étudiantes.
+- [ ] Mettre en place sauvegardes chiffrées, restauration régulière, rétention et purge contrôlées.
+- [ ] Tester la haute disponibilité raisonnable, la reprise des workers et les déploiements concurrents.
+- [ ] Ajouter les tableaux de bord, la rétention des métriques et les alertes opérationnelles.
+- [ ] Fournir la documentation administrateur, enseignant, étudiant et exploitation.
+- [ ] Publier les limites connues, les coûts de ressources et les profils effectivement supportés.
