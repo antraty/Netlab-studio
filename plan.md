@@ -38,3 +38,5 @@ L’éditeur évolue vers une expérience de type Packet Tracer, sans remplacer 
 - les propriétés détaillées restent disponibles dans le panneau réseau existant, avant une migration vers des fenêtres contextuelles par équipement.
 
 Le canvas est une couche d’intention utilisateur : il produit toujours une topologie JSON validée par FastAPI. Les liens visuels et les interfaces réseau doivent rester cohérents avec le plan d’exécution Docker ; les appliances réseau et les ports de switch avancés seront traités dans une étape ultérieure.
+
+Un double-clic sur un équipement ouvre désormais une fenêtre dédiée avec un onglet Terminal (WebSocket vers le conteneur réel) et un onglet Configuration rapide. Le panneau réseau complet reste la source de vérité pour les interfaces, routes, secrets et dépendances.

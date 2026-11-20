@@ -49,6 +49,7 @@
 - [ ] Livrer l’étape 1 de l’expérience Packet Tracer : une palette permet de glisser des PC, routeurs, serveurs et services vers le canvas, avec déplacement direct des objets.
 - [ ] Livrer l’étape 2 de l’expérience Packet Tracer : le canvas affiche les ports, permet de sélectionner deux ports pour créer un câble, et persiste les ports du lien avec les interfaces de la topologie.
 - [ ] Remplacer le switch virtuel visuel par une appliance réseau réellement persistante et connectable, au-delà de l’ajout d’un simple segment Docker bridge.
+- [x] Ouvrir un équipement par double-clic dans une fenêtre dédiée avec terminal WebSocket réel et onglet de configuration rapide.
 - [x] Ajouter une validation locale immédiate des références réseau, IPv4, routes et nœuds du test de connectivité avant sauvegarde ou déploiement.
 - [x] Ajouter l’édition contrôlée des paramètres des nœuds personnalisés et du test de connectivité depuis l’interface.
 - [x] Ajouter des modèles v2 prêts à l’emploi pour un réseau local simple et un scénario de routage statique client–routeur–serveur.
