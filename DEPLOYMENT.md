@@ -29,6 +29,8 @@ make ps
 
 Le premier compte enseignant est créé depuis l’interface avec `NETLAB_BOOTSTRAP_TOKEN`. Le worker et PostgreSQL ne sont pas publiés sur l’hôte. Seul le frontend expose le port HTTP 8080 par défaut.
 
+Les variables `NETLAB_WORKER_URL` et `NETLAB_CONTROL_URL` de `.env` servent au lancement direct des services sur l’hôte. Compose utilise séparément `NETLAB_COMPOSE_WORKER_URL` et `NETLAB_COMPOSE_CONTROL_URL` (par défaut `http://worker:9000` et `http://control:8000`) pour la communication DNS interne. Ne remplacez pas ces URL Compose par `127.0.0.1` : dans un conteneur, cette adresse référence le conteneur lui-même.
+
 Arrêt et suppression des conteneurs :
 
 ```bash

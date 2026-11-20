@@ -35,7 +35,8 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("NETLAB_WORKER_ID: ${NETLAB_WORKER_ID:-}", worker)
         self.assertIn(":/run/netlab/worker-certs:ro", worker)
         self.assertIn("socket.create_connection", worker)
-        self.assertIn("NETLAB_WORKER_URL: ${NETLAB_WORKER_URL:-http://worker:9000}", self.compose)
+        self.assertIn("NETLAB_WORKER_URL: ${NETLAB_COMPOSE_WORKER_URL:-http://worker:9000}", self.compose)
+        self.assertIn("NETLAB_CONTROL_URL: ${NETLAB_COMPOSE_CONTROL_URL:-http://control:8000}", worker)
         self.assertIn("NETLAB_DATABASE_URL: ${NETLAB_DATABASE_URL:-", self.compose)
 
     def test_frontend_proxies_api_and_websocket(self) -> None:

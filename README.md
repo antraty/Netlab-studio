@@ -2,6 +2,8 @@
 
 > **Packet Tracer + Docker + Cloud** : une plateforme de laboratoires réseau réels, accessible depuis un navigateur.
 
+> **Nouveau sur le projet ?** Consultez le [guide complet](./TUTORIAL.md) pour l’installation, les rôles, la création de laboratoires et les TP pédagogiques.
+
 ## Vision
 
 Netlab Studio est une plateforme qui permet de **dessiner, déployer et utiliser des laboratoires réseau et système réels depuis un navigateur**.
