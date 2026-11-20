@@ -32,17 +32,18 @@ services:
       NETLAB_WORKER_HOST: 0.0.0.0
       NETLAB_WORKER_PORT: 9000
       NETLAB_DATABASE_URL: postgresql://${POSTGRES_USER:-netlab}:${POSTGRES_PASSWORD:-netlab-development-only}@db:5432/${POSTGRES_DB:-netlab}?sslmode=disable
-      NETLAB_WORKER_ID: ${NETLAB_WORKER_ID:-docker-worker-1}
-      NETLAB_WORKER_NAME: ${NETLAB_WORKER_NAME:-Docker worker 1}
-      NETLAB_CONTROL_URL: http://control:8000
+      NETLAB_WORKER_ID: ${NETLAB_WORKER_ID:-}
+      NETLAB_WORKER_NAME: ${NETLAB_WORKER_NAME:-}
+      NETLAB_CONTROL_URL: ${NETLAB_CONTROL_URL:-http://control:8000}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${NETLAB_WORKER_CERTS_DIR:-./certs/worker}:/run/netlab/worker-certs:ro
     depends_on:
       db:
         condition: service_healthy
     expose: ["9000"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9000), timeout=2).close()"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -55,18 +56,22 @@ services:
     restart: unless-stopped
     environment:
       NETLAB_ENV: ${NETLAB_ENV:-development}
-      NETLAB_DATABASE_URL: postgresql://${POSTGRES_USER:-netlab}:${POSTGRES_PASSWORD:-netlab-development-only}@db:5432/${POSTGRES_DB:-netlab}?sslmode=disable
+      NETLAB_DATABASE_URL: ${NETLAB_DATABASE_URL:-postgresql://${POSTGRES_USER:-netlab}:${POSTGRES_PASSWORD:-netlab-development-only}@db:5432/${POSTGRES_DB:-netlab}?sslmode=disable}
       NETLAB_DATA_DIR: /data/netlab
       NETLAB_TOPOLOGY: /app/topology.json
-      NETLAB_WORKER_URL: http://worker:9000
+      NETLAB_WORKER_URL: ${NETLAB_WORKER_URL:-http://worker:9000}
       NETLAB_WORKER_TOKEN: ${NETLAB_WORKER_TOKEN:-change-me-in-development}
       NETLAB_ALLOWED_ORIGINS: ${NETLAB_ALLOWED_ORIGINS:-http://localhost:8080}
       NETLAB_ALLOWED_HOSTS: ${NETLAB_ALLOWED_HOSTS:-localhost,127.0.0.1}
       NETLAB_COOKIE_SECURE: ${NETLAB_COOKIE_SECURE:-false}
       NETLAB_BOOTSTRAP_TOKEN: ${NETLAB_BOOTSTRAP_TOKEN:-}
       NETLAB_ALLOWED_IMAGES: ${NETLAB_ALLOWED_IMAGES:-netlab/ubuntu-lab:24.04,netlab/debian-lab:bookworm,netlab/debian-router:bookworm,nginx:stable-alpine,httpd:2.4-alpine,coredns/coredns:1.12.0,postgres:17-alpine,mysql:8.4,mongo:8}
+      NETLAB_MTLS_CA_FILE: ${NETLAB_MTLS_CA_FILE:-}
+      NETLAB_MTLS_CERT_FILE: ${NETLAB_MTLS_CERT_FILE:-}
+      NETLAB_MTLS_KEY_FILE: ${NETLAB_MTLS_KEY_FILE:-}
     volumes:
       - netlab-data:/data/netlab
+      - ${NETLAB_CONTROL_CERTS_DIR:-./certs/control}:/run/netlab/control-certs:ro
     expose: ["8000"]
     depends_on:
       db:

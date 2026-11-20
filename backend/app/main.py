@@ -35,6 +35,7 @@ from .services import list_services
 from .security import (
     BodySizeLimitMiddleware,
     SecurityHeadersMiddleware,
+    client_ssl_context,
     configured_hosts,
     configured_origins,
     production_mode,
@@ -243,7 +244,11 @@ def readiness() -> JSONResponse:
     worker_url = os.getenv("NETLAB_WORKER_URL", "").rstrip("/")
     if worker_url:
         try:
-            with urllib.request.urlopen(worker_url + "/health", timeout=3) as response:
+            with urllib.request.urlopen(
+                worker_url + "/health",
+                timeout=3,
+                context=client_ssl_context("NETLAB_MTLS"),
+            ) as response:
                 checks["worker"] = "ok" if response.status == 200 else "error"
             if checks["worker"] != "ok":
                 status = "degraded"

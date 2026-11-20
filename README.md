@@ -373,13 +373,21 @@ La tranche 4 persiste les jobs dans PostgreSQL ou SQLite selon la configuration 
 
 Le worker peut utiliser un certificat HTTPS/mTLS côté serveur et le plan de contrôle peut présenter son propre certificat client. Les variables `NETLAB_MTLS_*` sont documentées dans `.env.example` et dans `DEPLOYMENT.md`. La reprise des laboratoires expirés effectue jusqu’à trois tentatives de nettoyage avant de conserver une alerte persistante.
 
+## Étape D — préparation cloud et workers concurrents
+
+En production, PostgreSQL est la source de vérité pour les comptes, les laboratoires et la file d’exécution. Les claims de jobs sont verrouillés avec `SKIP LOCKED`, ce qui permet à plusieurs workers de prendre des jobs différents sans collision ; les heartbeats périodiques prolongent le lease du worker actif. Une identité worker non configurée est dérivée du hostname de son conteneur. Pour migrer la base SQLite locale, sauvegardez-la puis configurez une URL PostgreSQL TLS pointant vers une base vide avant `python -m backend.app.migrate_db --source .netlab-data/education.sqlite3`.
+
+Le mode production exige mTLS dans les deux directions : le plan de contrôle présente un certificat client au endpoint HTTPS du worker, et le worker utilise un certificat client pour ses callbacks vers le endpoint HTTPS du plan de contrôle. Les certificats doivent être injectés comme secrets montés en lecture seule ; les chemins attendus sont listés dans `.env.example`. Le proxy TLS/ingress doit valider les certificats clients et router vers les services privés. Le socket Docker reste réservé au worker.
+
+Cette tranche permet le traitement concurrent et la reprise de jobs, mais ne constitue pas encore une garantie HA complète. Toutes les instances de contrôle doivent partager PostgreSQL et un stockage durable/partagé pour `NETLAB_DATA_DIR`; les workers doivent voir le moteur d’exécution prévu. Une stratégie de sauvegarde PostgreSQL, une restauration testée et un reverse proxy/ingress HA restent nécessaires pour une exploitation publique. Voir [DEPLOYMENT.md](DEPLOYMENT.md) pour les prérequis opérationnels.
+
 ## Préparation à l’exécution VM
 
 Le modèle de nœud accepte désormais `backend=docker|libvirt`, des limites `cpu_cores`, `memory_mb` et `disk_gb`, un identifiant de licence et un type de console. Ces champs sont validés avant le déploiement et enregistrés avec les quotas du laboratoire.
 
 L’adaptateur libvirt reste volontairement bloqué avec un message explicite. Les manifestes de licences, acceptations utilisateur, snapshots et audits d’ouverture/fermeture de console sont persistés. Cette base prépare la tranche 5 sans exposer encore de socket KVM, pfSense, CHR ou Active Directory.
 
-Cette phase est maintenant complète pour le flux pédagogique local. Les opérations du worker distant restent synchrones et la haute disponibilité des workers n’est pas garantie ; le projet ne doit pas être exposé publiquement avant durcissement et revue de sécurité.
+Cette phase est maintenant complète pour le flux pédagogique local. Les endpoints de déploiement des laboratoires restent synchrones ; la file persistante est disponible pour l’exécution distante, mais la haute disponibilité globale n’est pas garantie. Le projet ne doit pas être exposé publiquement avant durcissement et revue de sécurité.
 
 ### Phase 5 — première tranche : DNS CoreDNS
 
@@ -574,9 +582,9 @@ Le projet commence par un laboratoire Linux minimal, mais sa vision est plus lar
 
 ## Statut
 
-Le projet reste un **prototype**. Le mode production applique maintenant des contrôles de configuration bloquants : PostgreSQL avec TLS, cookies sécurisés, origines HTTPS et hôtes explicitement autorisés, worker distant HTTPS avec jeton fort, liste exacte d’images autorisées, limitation persistante des tentatives de connexion, entêtes de sécurité et taille maximale des requêtes. Les copies étudiantes et remises sont isolées et testées.
+Le projet reste un **prototype**. Le mode production applique des contrôles de configuration bloquants : PostgreSQL avec TLS, cookies sécurisés, origines HTTPS et hôtes explicitement autorisés, mTLS dans les deux sens entre le plan de contrôle et les workers, jeton worker fort, liste exacte d’images autorisées, limitation persistante des tentatives de connexion, entêtes de sécurité et taille maximale des requêtes. Les copies étudiantes et remises sont isolées et testées.
 
-Ces contrôles sont une base de durcissement, pas une certification de sécurité ni une garantie de disponibilité. Les tâches restent synchrones ; haute disponibilité, orchestration de jobs, politique de sauvegarde/récupération et tests de charge doivent encore être conçus avant un service public.
+La file PostgreSQL utilise maintenant des claims atomiques (`FOR UPDATE SKIP LOCKED`), des leases renouvelés pendant le traitement et des identités de workers distinctes. La migration SQLite vers PostgreSQL copie également les jobs, métriques, alertes et données d’exécution. Ces contrôles ne sont ni une certification de sécurité ni une garantie de disponibilité : un déploiement HA exige encore un stockage partagé pour les fichiers de topologie, une base PostgreSQL sauvegardée, un frontal TLS configuré pour le mTLS, ainsi que des essais de reprise et de charge.
 
 ## Prototype technique — étape 1
 

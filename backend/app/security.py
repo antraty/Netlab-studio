@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import ssl
 from urllib.parse import urlsplit
 from typing import Any, Awaitable, Callable
 
@@ -31,6 +32,41 @@ def configured_images() -> set[str]:
 
 def strong_secret(value: str) -> bool:
     return len(value) >= 32 and len(set(value)) >= 16
+
+
+def client_ssl_context(prefix: str, required: bool = False) -> ssl.SSLContext | None:
+    ca_file = os.getenv(f"{prefix}_CA_FILE", "")
+    cert_file = os.getenv(f"{prefix}_CERT_FILE", "")
+    key_file = os.getenv(f"{prefix}_KEY_FILE", "")
+    configured = (ca_file, cert_file, key_file)
+    if not any(configured):
+        if required:
+            raise RuntimeError(f"{prefix} requires CA, client certificate and private key files")
+        return None
+    if not all(configured):
+        raise RuntimeError(f"{prefix} requires CA, client certificate and private key files")
+    context = ssl.create_default_context(cafile=ca_file)
+    context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    return context
+
+
+def _validate_server_mtls(errors: list[str]) -> None:
+    cert_file = os.getenv("NETLAB_MTLS_SERVER_CERT_FILE", "")
+    key_file = os.getenv("NETLAB_MTLS_SERVER_KEY_FILE", "")
+    ca_file = os.getenv("NETLAB_MTLS_SERVER_CA_FILE", "")
+    if not all((cert_file, key_file, ca_file)):
+        errors.append(
+            "mTLS server requires NETLAB_MTLS_SERVER_CERT_FILE, "
+            "NETLAB_MTLS_SERVER_KEY_FILE and NETLAB_MTLS_SERVER_CA_FILE",
+        )
+        return
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        context.load_verify_locations(cafile=ca_file)
+        context.verify_mode = ssl.CERT_REQUIRED
+    except (OSError, ssl.SSLError) as exc:
+        errors.append(f"mTLS server certificate configuration is invalid: {exc}")
 
 
 def validate_production_settings() -> None:
@@ -69,16 +105,10 @@ def validate_production_settings() -> None:
         errors.append("NETLAB_WORKER_URL must use HTTPS")
     if not strong_secret(os.getenv("NETLAB_WORKER_TOKEN", "")):
         errors.append("NETLAB_WORKER_TOKEN must be a high-entropy secret of at least 32 characters")
-    mtls_files = [
-        os.getenv("NETLAB_MTLS_CA_FILE", ""),
-        os.getenv("NETLAB_MTLS_CERT_FILE", ""),
-        os.getenv("NETLAB_MTLS_KEY_FILE", ""),
-    ]
-    if any(mtls_files) and not all(mtls_files):
-        errors.append("mTLS requires NETLAB_MTLS_CA_FILE, NETLAB_MTLS_CERT_FILE and NETLAB_MTLS_KEY_FILE")
-    if all(mtls_files):
-        if not all(os.path.isfile(path) for path in mtls_files):
-            errors.append("configured mTLS certificate and key files must exist")
+    try:
+        client_ssl_context("NETLAB_MTLS", required=True)
+    except (OSError, ssl.SSLError, RuntimeError) as exc:
+        errors.append(f"API-to-worker mTLS configuration is invalid: {exc}")
     if not configured_images():
         errors.append("NETLAB_ALLOWED_IMAGES must list pre-approved container images")
     bootstrap_token = os.getenv("NETLAB_BOOTSTRAP_TOKEN", "")
@@ -109,16 +139,23 @@ def validate_worker_settings() -> None:
         errors.append("NETLAB_WORKER_TOKEN must be a high-entropy secret of at least 32 characters")
     if not configured_images():
         errors.append("NETLAB_ALLOWED_IMAGES must list pre-approved container images")
-    server_mtls = [
-        os.getenv("NETLAB_MTLS_SERVER_CERT_FILE", ""),
-        os.getenv("NETLAB_MTLS_SERVER_KEY_FILE", ""),
-        os.getenv("NETLAB_MTLS_SERVER_CA_FILE", ""),
-    ]
-    if any(server_mtls) and not all(server_mtls):
-        errors.append(
-            "mTLS server requires NETLAB_MTLS_SERVER_CERT_FILE, "
-            "NETLAB_MTLS_SERVER_KEY_FILE and NETLAB_MTLS_SERVER_CA_FILE",
-        )
+    if os.getenv("NETLAB_WORKER_TLS_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
+        errors.append("worker production server must be launched with worker.server and HTTPS/mTLS enabled")
+    _validate_server_mtls(errors)
+    control_url = urlsplit(os.getenv("NETLAB_CONTROL_URL", ""))
+    if (
+        control_url.scheme != "https"
+        or not control_url.hostname
+        or control_url.username is not None
+        or control_url.password is not None
+        or control_url.query
+        or control_url.fragment
+    ):
+        errors.append("NETLAB_CONTROL_URL must use HTTPS in production")
+    try:
+        client_ssl_context("NETLAB_CONTROL_MTLS", required=True)
+    except (OSError, ssl.SSLError, RuntimeError) as exc:
+        errors.append(f"worker-to-control mTLS configuration is invalid: {exc}")
     host = os.getenv("NETLAB_WORKER_HOST", "")
     try:
         address = ipaddress.ip_address(host)

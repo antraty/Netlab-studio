@@ -196,6 +196,8 @@ class EducationStore:
 
     def _initialize(self) -> None:
         with self._connect() as db:
+            if db.postgres:
+                db.execute("SELECT pg_advisory_xact_lock(7412051901)")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -261,6 +263,8 @@ class EducationStore:
                     started_at DOUBLE PRECISION,
                     completed_at DOUBLE PRECISION
                 );
+                CREATE INDEX IF NOT EXISTS idx_worker_jobs_claim
+                    ON worker_jobs(status,available_at,created_at);
                 CREATE TABLE IF NOT EXISTS execution_metrics (
                     id TEXT PRIMARY KEY,
                     worker_id TEXT,
@@ -856,25 +860,29 @@ class EducationStore:
     def claim_job(self, worker_id: str) -> dict[str, Any] | None:
         now = time.time()
         with self._connect() as db:
-            if db.postgres:
-                db.execute("SELECT id FROM remote_workers WHERE id=? FOR UPDATE", (worker_id,))
-            else:
-                db.execute("BEGIN IMMEDIATE")
             worker = db.execute("SELECT id FROM remote_workers WHERE id=?", (worker_id,)).fetchone()
             if not worker:
                 raise EducationError("worker is not registered")
-            row = db.execute(
-                "SELECT * FROM worker_jobs WHERE status='queued' AND available_at<=?"
-                " ORDER BY created_at LIMIT 1",
-                (now,),
-            ).fetchone()
-            if not row:
-                return None
-            job_id = row["id"]
+            if db.postgres:
+                row = db.execute(
+                    "SELECT * FROM worker_jobs WHERE status='queued' AND available_at<=? "
+                    "ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+                    (now,),
+                ).fetchone()
+            else:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT * FROM worker_jobs WHERE status='queued' AND available_at<=? "
+                    "ORDER BY created_at LIMIT 1",
+                    (now,),
+                ).fetchone()
             db.execute(
                 "UPDATE remote_workers SET last_heartbeat=?,status='online',updated_at=? WHERE id=?",
                 (now, now, worker_id),
             )
+            if not row:
+                return None
+            job_id = row["id"]
             db.execute(
                 "UPDATE worker_jobs SET status='running',worker_id=?,attempts=attempts+1,"
                 "started_at=?,updated_at=? WHERE id=?",
@@ -903,12 +911,17 @@ class EducationStore:
             "observability": observability,
         }
         with self._connect() as db:
+            if not db.postgres:
+                db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT attempts,status,worker_id,max_attempts FROM worker_jobs WHERE id=?",
+                "SELECT attempts,status,worker_id,max_attempts FROM worker_jobs WHERE id=?"
+                + (" FOR UPDATE" if db.postgres else ""),
                 (job_id,),
             ).fetchone()
             if not row:
                 raise EducationError("job not found")
+            if row["status"] != "running":
+                raise EducationError("job is no longer running")
             if row["worker_id"] != worker_id:
                 raise EducationError("job is leased by another worker")
             status = "completed" if ok else "failed"

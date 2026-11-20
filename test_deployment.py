@@ -28,6 +28,16 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertLess(worker_start, socket_index)
         self.assertLess(socket_index, control_start)
 
+    def test_worker_scale_uses_unique_hostnames_and_mounts_tls_material_read_only(self) -> None:
+        worker_start = self.compose.index("  worker:")
+        control_start = self.compose.index("  control:")
+        worker = self.compose[worker_start:control_start]
+        self.assertIn("NETLAB_WORKER_ID: ${NETLAB_WORKER_ID:-}", worker)
+        self.assertIn(":/run/netlab/worker-certs:ro", worker)
+        self.assertIn("socket.create_connection", worker)
+        self.assertIn("NETLAB_WORKER_URL: ${NETLAB_WORKER_URL:-http://worker:9000}", self.compose)
+        self.assertIn("NETLAB_DATABASE_URL: ${NETLAB_DATABASE_URL:-", self.compose)
+
     def test_frontend_proxies_api_and_websocket(self) -> None:
         nginx = (ROOT / "docker/nginx.conf").read_text(encoding="utf-8")
         self.assertIn("location /api/", nginx)

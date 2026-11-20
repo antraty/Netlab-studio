@@ -3,6 +3,8 @@ import ssl
 
 import uvicorn
 
+from backend.app.security import validate_worker_settings
+
 
 def main() -> None:
     kwargs = {}
@@ -21,6 +23,8 @@ def main() -> None:
             ssl_ca_certs=ca_file,
             ssl_cert_reqs=ssl.CERT_REQUIRED,
         )
+        os.environ["NETLAB_WORKER_TLS_ENABLED"] = "true"
+    validate_worker_settings()
     uvicorn.run(
         "worker.main:app",
         host=os.getenv("NETLAB_WORKER_HOST", "0.0.0.0"),

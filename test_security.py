@@ -11,9 +11,11 @@ from fastapi.testclient import TestClient
 from starlette.responses import Response
 
 from backend.app.education import EducationStore, _set_session
+from backend.app import migrate_db
 from backend.app.security import (
     BodySizeLimitMiddleware,
     SecurityHeadersMiddleware,
+    client_ssl_context,
     validate_production_settings,
     validate_production_topology,
     validate_worker_settings,
@@ -31,22 +33,34 @@ class ProductionSecurityTests(unittest.TestCase):
             "NETLAB_WORKER_URL": "https://worker.internal",
             "NETLAB_WORKER_TOKEN": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
             "NETLAB_ALLOWED_IMAGES": "netlab/ubuntu-lab:24.04,nginx:stable-alpine",
+            "NETLAB_MTLS_CA_FILE": "/unused/ca.crt",
+            "NETLAB_MTLS_CERT_FILE": "/unused/control.crt",
+            "NETLAB_MTLS_KEY_FILE": "/unused/control.key",
         }
 
     def test_production_settings_fail_closed_and_accept_secure_values(self):
-        with patch.dict(os.environ, self.production_environment(), clear=True):
+        with patch("backend.app.security.client_ssl_context", return_value=object()) as client_context, patch.dict(
+            os.environ, self.production_environment(), clear=True,
+        ):
             validate_production_settings()
+            client_context.assert_called_once_with("NETLAB_MTLS", required=True)
 
         unsafe = self.production_environment()
         unsafe["NETLAB_ALLOWED_ORIGINS"] = "http://netlab.example.test"
-        with patch.dict(os.environ, unsafe, clear=True):
+        with patch("backend.app.security.client_ssl_context", return_value=object()), patch.dict(os.environ, unsafe, clear=True):
             with self.assertRaisesRegex(RuntimeError, "HTTPS origins"):
                 validate_production_settings()
 
         unsafe = self.production_environment()
         unsafe["NETLAB_WORKER_URL"] = "http://worker.internal"
-        with patch.dict(os.environ, unsafe, clear=True):
+        with patch("backend.app.security.client_ssl_context", return_value=object()), patch.dict(os.environ, unsafe, clear=True):
             with self.assertRaisesRegex(RuntimeError, "WORKER_URL.*HTTPS"):
+                validate_production_settings()
+
+        unsafe = self.production_environment()
+        del unsafe["NETLAB_MTLS_CERT_FILE"]
+        with patch.dict(os.environ, unsafe, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "mTLS configuration is invalid"):
                 validate_production_settings()
 
     def test_worker_must_use_private_bind_address_and_strong_token(self):
@@ -55,13 +69,74 @@ class ProductionSecurityTests(unittest.TestCase):
             "NETLAB_WORKER_TOKEN": "B1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q6",
             "NETLAB_WORKER_HOST": "10.10.0.5",
             "NETLAB_ALLOWED_IMAGES": "netlab/ubuntu-lab:24.04",
+            "NETLAB_CONTROL_URL": "https://control.internal",
+            "NETLAB_WORKER_TLS_ENABLED": "true",
+            "NETLAB_CONTROL_MTLS_CA_FILE": "/unused/ca.crt",
+            "NETLAB_CONTROL_MTLS_CERT_FILE": "/unused/worker-client.crt",
+            "NETLAB_CONTROL_MTLS_KEY_FILE": "/unused/worker-client.key",
+            "NETLAB_MTLS_SERVER_CERT_FILE": "/unused/worker.crt",
+            "NETLAB_MTLS_SERVER_KEY_FILE": "/unused/worker.key",
+            "NETLAB_MTLS_SERVER_CA_FILE": "/unused/ca.crt",
         }
-        with patch.dict(os.environ, worker_environment, clear=True):
+        with patch("backend.app.security.client_ssl_context", return_value=object()), patch(
+            "backend.app.security._validate_server_mtls",
+        ), patch.dict(os.environ, worker_environment, clear=True):
             validate_worker_settings()
         worker_environment["NETLAB_WORKER_HOST"] = "0.0.0.0"
-        with patch.dict(os.environ, worker_environment, clear=True):
+        with patch("backend.app.security.client_ssl_context", return_value=object()), patch(
+            "backend.app.security._validate_server_mtls",
+        ), patch.dict(os.environ, worker_environment, clear=True):
             with self.assertRaisesRegex(RuntimeError, "private IP"):
                 validate_worker_settings()
+
+    def test_production_requires_mtls_for_both_worker_directions(self):
+        control = self.production_environment()
+        control.pop("NETLAB_MTLS_CA_FILE")
+        control.pop("NETLAB_MTLS_CERT_FILE")
+        control.pop("NETLAB_MTLS_KEY_FILE")
+        with patch.dict(os.environ, control, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "mTLS configuration is invalid"):
+                validate_production_settings()
+
+        worker = {
+            "NETLAB_ENV": "production",
+            "NETLAB_WORKER_TOKEN": "B1c2D3e4F5g6H7i8J9k0L1m2N3o4P5q6",
+            "NETLAB_WORKER_HOST": "10.10.0.5",
+            "NETLAB_ALLOWED_IMAGES": "netlab/ubuntu-lab:24.04",
+            "NETLAB_CONTROL_URL": "https://control.internal",
+        }
+        with patch.dict(os.environ, worker, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "mTLS server requires"):
+                validate_worker_settings()
+
+        worker.update({
+            "NETLAB_WORKER_TLS_ENABLED": "true",
+            "NETLAB_MTLS_SERVER_CERT_FILE": "/unused/worker.crt",
+            "NETLAB_MTLS_SERVER_KEY_FILE": "/unused/worker.key",
+            "NETLAB_MTLS_SERVER_CA_FILE": "/unused/ca.crt",
+        })
+        with patch("backend.app.security._validate_server_mtls"), patch.dict(os.environ, worker, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "worker-to-control mTLS"):
+                validate_worker_settings()
+
+    def test_client_tls_context_requires_complete_identity(self):
+        with patch.dict(os.environ, {"NETLAB_MTLS_CA_FILE": "/ca.crt"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "requires CA, client certificate and private key"):
+                client_ssl_context("NETLAB_MTLS")
+
+    def test_sqlite_migration_includes_runtime_and_worker_tables(self):
+        self.assertTrue({
+            "remote_workers",
+            "worker_jobs",
+            "execution_metrics",
+            "alert_notifications",
+            "cleanup_attempts",
+            "execution_resources",
+            "license_manifests",
+            "license_acceptances",
+            "execution_snapshots",
+            "console_audit",
+        }.issubset(migrate_db._TABLES))
 
     def test_production_topology_uses_exact_image_allowlist(self):
         topology = {"nodes": [{"image": "netlab/ubuntu-lab:24.04"}, {"image": "nginx:stable-alpine"}]}

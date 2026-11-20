@@ -6,7 +6,6 @@ import ipaddress
 import json
 import os
 import re
-import ssl
 import subprocess
 import time
 import urllib.error
@@ -17,6 +16,7 @@ from typing import Any, Protocol
 
 import netlab
 from backend.app.observability import collect_docker_observability
+from backend.app.security import client_ssl_context
 
 
 @dataclass
@@ -190,14 +190,8 @@ class RemoteWorkerOrchestrator:
             },
             method="POST",
         )
-        ca_file = os.getenv("NETLAB_MTLS_CA_FILE", "")
-        cert_file = os.getenv("NETLAB_MTLS_CERT_FILE", "")
-        key_file = os.getenv("NETLAB_MTLS_KEY_FILE", "")
-        if self.base_url.startswith("https://") and any((ca_file, cert_file, key_file)):
-            if not all((ca_file, cert_file, key_file)):
-                raise RuntimeError("mTLS requires NETLAB_MTLS_CA_FILE, NETLAB_MTLS_CERT_FILE and NETLAB_MTLS_KEY_FILE")
-            ssl_context = ssl.create_default_context(cafile=ca_file)
-            ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        ssl_context = client_ssl_context("NETLAB_MTLS") if self.base_url.startswith("https://") else None
+        if ssl_context:
             opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context))
         else:
             opener = urllib.request.build_opener()

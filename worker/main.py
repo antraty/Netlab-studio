@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -17,19 +18,22 @@ from .contracts import WorkerJob, WorkerResult
 from backend.app.security import (
     BodySizeLimitMiddleware,
     SecurityHeadersMiddleware,
+    client_ssl_context,
     validate_production_topology,
     validate_worker_settings,
 )
 
 TOKEN = os.getenv("NETLAB_WORKER_TOKEN", "")
-WORKER_ID = os.getenv("NETLAB_WORKER_ID", "docker-worker-1").strip() or "docker-worker-1"
+WORKER_ID = os.getenv("NETLAB_WORKER_ID", "").strip() or os.getenv("HOSTNAME", "docker-worker-1")
 WORKER_NAME = os.getenv("NETLAB_WORKER_NAME", WORKER_ID).strip() or WORKER_ID
 CONTROL_URL = os.getenv("NETLAB_CONTROL_URL", "").rstrip("/")
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     validate_worker_settings()
+    control_ssl_context = client_ssl_context("NETLAB_CONTROL_MTLS")
     stop_event = threading.Event()
 
     def queue_request(path: str, payload: dict) -> dict | None:
@@ -45,22 +49,29 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=10, context=control_ssl_context) as response:
                 return json.loads(response.read().decode())
-        except (urllib.error.URLError, TimeoutError, urllib.error.HTTPError):
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            logger.warning("Worker control-plane request failed for %s: %s", path, exc)
             return None
 
     def heartbeat() -> None:
-        queue_request("/api/execution/worker/heartbeat", {
+        response = queue_request("/api/execution/worker/heartbeat", {
             "worker_id": WORKER_ID,
             "worker_name": WORKER_NAME,
             "capabilities": ["docker"],
         })
+        if response is None:
+            logger.warning("Worker heartbeat was not acknowledged by the control plane")
+
+    def heartbeat_loop() -> None:
+        while not stop_event.is_set():
+            heartbeat()
+            stop_event.wait(15)
 
     def queue_poller() -> None:
         while not stop_event.wait(1):
             try:
-                heartbeat()
                 claimed = queue_request(
                     "/api/execution/worker/jobs/claim",
                     {"worker_id": WORKER_ID},
@@ -126,15 +137,24 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                             "duration_ms": int((time.monotonic() - started) * 1000),
                         },
                     )
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.error("Worker received an invalid job payload: %s", exc)
                 continue
 
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        name="netlab-worker-heartbeat",
+        daemon=True,
+    )
     poller = threading.Thread(target=queue_poller, name="netlab-worker-queue", daemon=True)
+    heartbeat_thread.start()
     poller.start()
     try:
         yield
     finally:
         stop_event.set()
+        heartbeat_thread.join(timeout=2)
+        poller.join(timeout=2)
 
 
 app = FastAPI(title="Netlab Studio Docker Worker", version="0.4.0", lifespan=lifespan)

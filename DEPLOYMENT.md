@@ -78,13 +78,14 @@ Le worker lit cette variable, génère un fichier runtime temporaire en mode `06
 
 Le fichier Compose fournit un environnement local reproductible, pas une exposition Internet prête à l’emploi. Avant une exposition publique :
 
-1. utiliser un reverse-proxy HTTPS devant le frontend ;
+1. utiliser un reverse-proxy/ingress HTTPS devant le frontend et le plan de contrôle ;
 2. définir `NETLAB_ENV=production`, `NETLAB_COOKIE_SECURE=true` et des origines HTTPS ;
-3. remplacer PostgreSQL local par une instance TLS avec `sslmode=require` ou plus strict ;
+3. utiliser PostgreSQL managé ou redondé avec TLS (`sslmode=verify-full` recommandé) et sauvegardes ;
 4. utiliser des secrets aléatoires d’au moins 32 caractères pour le mot de passe PostgreSQL, le token worker et le token bootstrap ;
 5. remplacer les tags d’images mutables par des digests vérifiés et scanner les images ;
-6. restreindre le socket Docker et le réseau du worker, puis planifier sa rotation et sa supervision ;
-7. ne jamais publier les ports 8000, 9000 ou 5432.
+6. configurer le mTLS obligatoire dans les deux sens entre le plan de contrôle et les workers ; injecter les certificats comme secrets montés en lecture seule ;
+7. restreindre le socket Docker et les réseaux workers, puis planifier leur rotation et supervision ;
+8. ne jamais publier directement les ports 8000, 9000 ou 5432.
 
 La validation de production bloque volontairement une configuration HTTP ou PostgreSQL non chiffrée. Le profil Compose reste en mode `development` par défaut pour que le démarrage local fonctionne avec `http://localhost:8080`.
 
@@ -123,6 +124,37 @@ Le worker est exposé uniquement sur le réseau interne Compose. En production :
 5. identifier chaque worker avec `NETLAB_WORKER_ID` et `NETLAB_WORKER_NAME`.
 
 Les jobs échoués sont retentés avec un backoff borné. Les leases expirés sont remis automatiquement en file. Les laboratoires expirés sont nettoyés jusqu’à trois fois ; chaque tentative est enregistrée avec son résultat et son erreur.
+
+## Étape D — base TLS, migration et workers redondants
+
+### Migrer SQLite vers PostgreSQL
+
+La cible doit être une base PostgreSQL vide. Faites une sauvegarde de la source SQLite et conservez le fichier intact pendant la migration. Définissez une URL PostgreSQL avec TLS et le certificat CA de confiance, puis lancez le migrateur depuis la racine du projet :
+
+```bash
+export NETLAB_DATABASE_URL='postgresql://netlab:mot-de-passe@postgres.example.org:5432/netlab?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.crt'
+.venv/bin/python -m backend.app.migrate_db --source .netlab-data/education.sqlite3
+```
+
+Le migrateur refuse une cible contenant déjà des comptes et copie aussi les workers, jobs, métriques, alertes, données de licences, snapshots, journaux et données pédagogiques. Gardez une sauvegarde PostgreSQL et vérifiez les nombres de comptes/laboratoires avant de basculer le service. Les versions conservées uniquement sous forme de fichiers doivent aussi être disponibles via le stockage de `NETLAB_DATA_DIR`.
+
+### mTLS entre services
+
+Le mode `NETLAB_ENV=production` refuse maintenant de démarrer sans mTLS configuré :
+
+- le plan de contrôle utilise `NETLAB_MTLS_CA_FILE`, `NETLAB_MTLS_CERT_FILE` et `NETLAB_MTLS_KEY_FILE` pour appeler le worker ;
+- le worker sert HTTPS avec `NETLAB_MTLS_SERVER_CERT_FILE`, `NETLAB_MTLS_SERVER_KEY_FILE` et `NETLAB_MTLS_SERVER_CA_FILE`, et exige le certificat client ;
+- les callbacks du worker vers le plan de contrôle utilisent `NETLAB_CONTROL_MTLS_CA_FILE`, `NETLAB_CONTROL_MTLS_CERT_FILE` et `NETLAB_CONTROL_MTLS_KEY_FILE`, avec `NETLAB_CONTROL_URL` en HTTPS.
+
+Les certificats ne doivent pas être placés dans le dépôt ou dans les images. Les fournir par gestionnaire de secrets ou volumes montés en lecture seule. La terminaison HTTPS/mTLS du plan de contrôle doit être configurée sur l’ingress/reverse proxy : il doit valider le certificat client des workers, et `NETLAB_CONTROL_URL` doit pointer sur ce endpoint interne. Les fichiers d’exemple indiquent les chemins de conteneur attendus. Ne pas désactiver la validation CA ou hostname.
+
+### Réplicas et limites opérationnelles
+
+- Plusieurs workers peuvent interroger la même file PostgreSQL : les claims utilisent `FOR UPDATE SKIP LOCKED` et un index de file. Laisser `NETLAB_WORKER_ID` vide pour que chaque instance s’identifie avec son hostname unique.
+- Les heartbeats du worker continuent pendant l’exécution d’un job pour renouveler son lease. Après arrêt brutal, un lease expiré permet une nouvelle tentative ; une action longue peut donc être rejouée et doit être considérée comme *at-least-once*.
+- Plusieurs instances de contrôle doivent partager PostgreSQL et le même stockage durable pour `NETLAB_DATA_DIR`. Un volume Docker local n’est pas un stockage partagé entre hôtes.
+- La réplication de worker n’est sûre que si ces workers opèrent sur le moteur Docker visé et partagent les mêmes ressources de laboratoire ; une flotte multi-hôtes requiert un routage de jobs par capacité/placement et un moteur d’exécution distribué, pas simplement davantage de réplicas Compose.
+- La file persistante n’assure pas à elle seule une HA complète : déployer aussi un ingress/redémarrage automatique, sauvegardes régulières et restaurations éprouvées, supervision PostgreSQL et tests de panne avant toute mise en service publique.
 
 ## Préparation KVM/libvirt
 

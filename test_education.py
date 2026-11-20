@@ -64,6 +64,44 @@ class EducationApiTests(unittest.TestCase):
         )
         self.assertEqual(connection.parameters, ("teacher@example.test",))
 
+    def test_postgres_worker_claim_uses_skip_locked_and_requires_registered_worker(self):
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class FakePostgresConnection:
+            postgres = True
+            statements = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def execute(self, statement, parameters=()):
+                self.statements.append(statement)
+                if "FROM remote_workers" in statement:
+                    return Result({"id": parameters[0]} if parameters[0] == "worker-a" else None)
+                if "FROM worker_jobs" in statement:
+                    return Result(None)
+                return Result(None)
+
+        fake = FakePostgresConnection()
+        with patch.object(education.store, "_connect", return_value=fake):
+            self.assertIsNone(education.store.claim_job("worker-a"))
+        claim_query = next(statement for statement in fake.statements if "FROM worker_jobs" in statement)
+        self.assertIn("LIMIT 1 FOR UPDATE SKIP LOCKED", claim_query)
+
+        fake.statements.clear()
+        with patch.object(education.store, "_connect", return_value=fake):
+            with self.assertRaisesRegex(education.EducationError, "worker is not registered"):
+                education.store.claim_job("unknown-worker")
+        self.assertFalse(any("FROM worker_jobs" in statement for statement in fake.statements))
+
     def test_educational_flow_is_authenticated_and_student_cannot_deploy(self):
         topology = load_topology(Path(__file__).parent / "topology.json")
         state = self.client.get("/api/auth/state").json()
