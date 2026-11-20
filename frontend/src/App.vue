@@ -45,6 +45,9 @@ const studentTerminalNode = ref('')
 const studentTerminalCommand = ref('hostname')
 const studentSelectedNodeName = ref('')
 const studentSubmissionHistory = ref<SubmissionAttempt[]>([])
+const studentVerificationOutput = ref('')
+const studentHintsOpen = ref(false)
+const studentGuideStep = ref(0)
 const selectedSubmission = ref<{ assignment_id: string; student_id: string; title: string; display_name: string } | null>(null)
 const teacherSubmissionHistory = ref<SubmissionAttempt[]>([])
 const feedbackDrafts = ref<Record<string, string>>({})
@@ -107,6 +110,35 @@ const selectedNodeLinks = computed(() => {
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
 const selectedStudentNode = computed(() => activeAssignment.value?.topology.nodes.find(node => node.name === studentSelectedNodeName.value))
+const studentPath = computed(() => {
+  const current = activeAssignment.value?.topology
+  if (!current) return [] as string[]
+  const from = current.connectivity_check.from
+  const to = current.connectivity_check.to
+  if (!from || !to) return [] as string[]
+  const queue: string[][] = [[from]]
+  const visited = new Set([from])
+  while (queue.length) {
+    const path = queue.shift()!
+    const last = path[path.length - 1]
+    if (last === to) return path
+    for (const link of current.links ?? []) {
+      const next = link.from === last ? link.to : link.to === last ? link.from : ''
+      if (next && !visited.has(next)) { visited.add(next); queue.push([...path, next]) }
+    }
+  }
+  return [] as string[]
+})
+const studentCriterionStates = computed(() => (activeAssignment.value?.criteria ?? []).map(criterion => {
+  const text = criterion.toLowerCase()
+  const topology = activeAssignment.value?.topology
+  if (!topology) return 'unknown'
+  if (text.includes('ping') || text.includes('atteint') || text.includes('connect')) return studentVerificationOutput.value.toLowerCase().includes('ok') || studentVerificationOutput.value.toLowerCase().includes('success') ? 'ok' : 'todo'
+  if (text.includes('route')) return topology.nodes.some(node => (node.routes ?? []).length > 0 && node.routes?.every(route => route.destination && route.via)) ? 'ok' : 'todo'
+  if (text.includes('ipv4') || text.includes('adresse')) return topology.nodes.every(node => (node.interfaces ?? []).every(item => Boolean(item.ipv4))) ? 'ok' : 'todo'
+  if (text.includes('réseau') || text.includes('segment')) return (topology.networks ?? []).length > 0 ? 'ok' : 'todo'
+  return 'unknown'
+}))
 const activeLaboratory = computed(() => laboratories.value.find(item => item.id === activeLaboratoryId.value))
 const canModifyLaboratory = computed(() => ['teacher', 'admin'].includes(user.value?.role ?? '') && ['owner', 'editor'].includes(activeLaboratory.value?.role ?? ''))
 const ownsLaboratory = computed(() => ['teacher', 'admin'].includes(user.value?.role ?? '') && activeLaboratory.value?.role === 'owner')
@@ -411,6 +443,9 @@ function selectAssignment(id: string) {
   activeAssignmentId.value = id
   const item = activeAssignment.value
   studentDraftDirty.value = false
+  studentVerificationOutput.value = ''
+  studentHintsOpen.value = false
+  studentGuideStep.value = 0
   studentSelectedNodeName.value = item?.topology.nodes[0]?.name ?? ''
   studentTerminalNode.value = item?.topology.nodes[0]?.name ?? ''
   void refreshStudentRuntime()
@@ -494,6 +529,10 @@ async function studentRuntimeAction(action: 'up' | 'down' | 'verify') {
     }
     const result = await api.studentRuntimeAction(item.id, action)
     terminalOutput.value = result.output || (result.ok ? `${action} : terminé` : `${action} : échec (code ${result.exit_code})`)
+    if (action === 'verify') {
+      studentVerificationOutput.value = result.output || (result.ok ? 'OK — vérification réussie.' : 'Échec de la vérification.')
+      studentGuideStep.value = 3
+    }
     if (action === 'up') item.runtime_status = result.ok ? 'running' : 'failed'
     if (action === 'down') item.runtime_status = result.ok ? 'stopped' : 'failed'
     if (result.ok) await refreshStudentRuntime()
@@ -1040,6 +1079,14 @@ onUnmounted(() => {
           <nav class="assignment-list"><button v-for="item in assignments" :key="item.id" class="secondary assignment-item" :class="{ active: activeAssignmentId === item.id }" @click="selectAssignment(item.id)"><strong>{{ item.title }}</strong><small>{{ item.group_name }} · {{ item.status }}</small></button></nav>
           <div v-if="activeAssignment" class="assignment-editor">
             <div class="section-title"><div><h2>{{ activeAssignment.title }}</h2><span>{{ activeAssignment.group_name }} · {{ activeAssignment.status }} · runtime {{ activeAssignment.runtime_status }}</span></div><div class="tools"><button class="secondary" @click="cloneAssignment">{{ activeAssignment.topology.laboratory_id ? 'Réinitialiser ma copie' : 'Créer ma copie' }}</button><button class="secondary" :disabled="['running', 'failed'].includes(activeAssignment.runtime_status)" @click="saveAssignment">Enregistrer la copie</button><button @click="submitAssignment">Remettre</button></div></div>
+            <section class="guided-learning panel nested">
+              <div class="section-title"><div><p class="eyebrow">PARCOURS GUIDÉ / ÉTAPE 5</p><h3>Construire, tester, expliquer</h3><span>Un chemin court pour progresser dans ce laboratoire.</span></div><span class="badge online">Étape {{ studentGuideStep + 1 }} / 4</span></div>
+              <div class="guide-steps"><button v-for="(step, index) in ['Lire l’objectif', 'Configurer le réseau', 'Déployer la copie', 'Vérifier le résultat']" :key="step" class="guide-step" :class="{ active: studentGuideStep === index, done: studentGuideStep > index }" @click="studentGuideStep = index"><strong>{{ index + 1 }}</strong><span>{{ step }}</span></button></div>
+              <div class="guide-content"><p v-if="studentGuideStep === 0">Commencez par identifier la source, la destination et le rôle de chaque équipement. Les critères ci-dessous décrivent le résultat attendu.</p><p v-else-if="studentGuideStep === 1">Renseignez les adresses IPv4, les passerelles et les routes statiques dans l’éditeur de votre copie. Le chemin théorique est affiché à droite.</p><p v-else-if="studentGuideStep === 2">Créez votre copie puis déployez-la. Vous pourrez ouvrir un terminal sur chaque nœud après le démarrage.</p><p v-else>Utilisez la vérification de connectivité, puis comparez sa sortie avec les critères de réussite avant de remettre le TP.</p></div>
+              <details class="hint-box" :open="studentHintsOpen" @toggle="studentHintsOpen = ($event.target as HTMLDetailsElement).open"><summary>Afficher un indice</summary><p>Commencez par le premier lien du chemin. Un routeur doit posséder une interface dans chaque segment traversé et une route vers le réseau distant.</p></details>
+              <div v-if="activeAssignment.criteria.length" class="criteria-checklist"><strong>Critères de réussite</strong><ul><li v-for="(criterion, index) in activeAssignment.criteria" :key="criterion" :class="`criterion-${studentCriterionStates[index]}`"><span class="criterion-mark">{{ studentCriterionStates[index] === 'ok' ? 'OK' : studentCriterionStates[index] === 'todo' ? 'À faire' : '?' }}</span><span>{{ criterion }}</span></li></ul></div>
+              <div class="packet-path"><div class="section-title"><strong>Chemin logique du paquet</strong><span>{{ studentPath.length ? `${studentPath.length} étape(s)` : 'chemin incomplet' }}</span></div><div v-if="studentPath.length" class="path-flow"><template v-for="(nodeName, index) in studentPath" :key="nodeName"><span class="path-node">{{ nodeName }}</span><span v-if="index < studentPath.length - 1" class="path-arrow">→</span></template></div><p v-else class="muted">Reliez la source et la destination dans la topologie pour visualiser le chemin.</p></div>
+            </section>
             <div class="assignment-instructions">
               <p v-if="activeAssignment.instructions">{{ activeAssignment.instructions }}</p>
               <div v-if="activeAssignment.criteria.length"><strong>Critères de réussite</strong><ul><li v-for="criterion in activeAssignment.criteria" :key="criterion">{{ criterion }}</li></ul></div>

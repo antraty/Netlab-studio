@@ -46,11 +46,12 @@
 - [x] Déployer un scénario client–routeur–serveur avec forwarding IPv4 réel.
 - [x] Ajouter des images Ubuntu/Debian de laboratoire contenant `ip`, `ping` et les outils réseau.
 - [x] Ajouter dans l’éditeur Vue la configuration interactive des réseaux, interfaces, IP et routes v2, avec ajout/suppression contrôlée et activation du mode routeur.
-- [ ] Livrer l’étape 1 de l’expérience Packet Tracer : une palette permet de glisser des PC, routeurs, serveurs et services vers le canvas, avec déplacement direct des objets.
-- [ ] Livrer l’étape 2 de l’expérience Packet Tracer : le canvas affiche les ports, permet de sélectionner deux ports pour créer un câble, et persiste les ports du lien avec les interfaces de la topologie.
+- [x] Livrer l’étape 1 de l’expérience Packet Tracer : palette latérale, glisser-déposer, sélection, déplacement, suppression confirmée, zoom et panoramique du canvas.
+- [x] Livrer l’étape 2 de l’expérience Packet Tracer : ports visibles, câblage entre ports, création automatique d’interfaces, segments réseau, détection des ports occupés et protection contre les câbles invalides.
 - [ ] Remplacer le switch virtuel visuel par une appliance réseau réellement persistante et connectable, au-delà de l’ajout d’un simple segment Docker bridge.
-- [x] Ouvrir un équipement par double-clic dans une fenêtre dédiée avec terminal WebSocket réel et onglet de configuration rapide.
-- [x] Ajouter une validation locale immédiate des références réseau, IPv4, routes et nœuds du test de connectivité avant sauvegarde ou déploiement.
+- [x] Ouvrir un équipement par double-clic dans une fenêtre dédiée avec onglets terminal, réseau, journaux et ressources.
+- [x] Ajouter une validation locale immédiate des références réseau, IPv4, routes, câbles et nœuds du test de connectivité avant sauvegarde ou déploiement, avec erreurs marquées sur le schéma.
+- [x] Ajouter le socle de l’étape 5 : parcours guidé étudiant, indice contextuel, états automatiques des critères, vérification de connectivité et visualisation du chemin logique du paquet.
 - [x] Ajouter l’édition contrôlée des paramètres des nœuds personnalisés et du test de connectivité depuis l’interface.
 - [x] Ajouter des modèles v2 prêts à l’emploi pour un réseau local simple et un scénario de routage statique client–routeur–serveur.
 - [ ] Faire une revue de sécurité, activer HTTPS et définir le durcissement nécessaire avant une exposition publique.
