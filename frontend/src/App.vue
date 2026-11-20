@@ -71,6 +71,8 @@ const observabilityRefreshAllowed = ref(true)
 const cableStart = ref<{ nodeName: string; portIndex: number } | null>(null)
 const devicePanelOpen = ref(false)
 const devicePanelTab = ref<'terminal' | 'network' | 'logs' | 'resources'>('terminal')
+const canvasView = ref({ x: 0, y: 0, scale: 1 })
+const canvasPanning = ref(false)
 const paletteItems: PaletteItem[] = [
   { id: 'pc-ubuntu', label: 'PC Ubuntu', description: 'poste Linux prêt pour les exercices IP', icon: 'PC', kind: 'node', image: 'netlab/ubuntu-lab:24.04', type: 'linux' },
   { id: 'router-linux', label: 'Routeur Linux', description: 'routeur Debian avec forwarding IPv4', icon: 'R', kind: 'node', image: 'netlab/debian-router:bookworm', type: 'router', router: true },
@@ -137,10 +139,28 @@ const topologyIssues = computed(() => {
       if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(route.via)) issues.push(`Passerelle de route invalide sur ${node.name}`)
     }
   }
+  const nodeNames = new Set(current.nodes.map(node => node.name))
+  const linkKeys = new Set<string>()
+  for (const link of current.links ?? []) {
+    if (!nodeNames.has(link.from)) issues.push(`Le câble part d’un nœud absent : ${link.from}`)
+    if (!nodeNames.has(link.to)) issues.push(`Le câble arrive sur un nœud absent : ${link.to}`)
+    if (link.from === link.to) issues.push(`Le câble ${link.from} ne peut pas relier un nœud à lui-même`)
+    const key = [link.from, link.from_port ?? 'eth0', link.to, link.to_port ?? 'eth0'].join(':')
+    const reverseKey = [link.to, link.to_port ?? 'eth0', link.from, link.from_port ?? 'eth0'].join(':')
+    if (linkKeys.has(key) || linkKeys.has(reverseKey)) issues.push(`Câble dupliqué entre ${link.from} et ${link.to}`)
+    linkKeys.add(key)
+    for (const [nodeName, portName] of [[link.from, link.from_port], [link.to, link.to_port]] as Array<[string, string | undefined]>) {
+      const linkedNode = current.nodes.find(node => node.name === nodeName)
+      if (linkedNode && portName && !(linkedNode.interfaces ?? []).some(item => item.name === portName)) issues.push(`${nodeName}.${portName} est absent des interfaces déclarées`)
+    }
+  }
   if (!current.nodes.some(node => node.name === current.connectivity_check.from)) issues.push('Le nœud source du test est introuvable')
   if (!current.nodes.some(node => node.name === current.connectivity_check.to)) issues.push('Le nœud destination du test est introuvable')
   return [...new Set(issues)]
 })
+function nodeHasTopologyIssue(nodeName: string) {
+  return topologyIssues.value.some(issue => issue.includes(nodeName))
+}
 const labTemplates: Array<{ id: string; label: string; description: string; topology: Topology }> = [
   {
     id: 'static-routing',
@@ -536,10 +556,22 @@ function linkPortIndex(node: Node, portName: string | undefined) {
   const index = node.interfaces?.findIndex(item => item.name === portName) ?? -1
   return index >= 0 ? index : 0
 }
+function portIsOccupied(node: Node, portIndex: number) {
+  const portName = portLabel(node, portIndex)
+  return topology.value?.links.some(link =>
+    (link.from === node.name && (link.from_port ?? 'eth0') === portName) ||
+    (link.to === node.name && (link.to_port ?? 'eth0') === portName),
+  ) ?? false
+}
 function connectPorts(node: Node, portIndex: number) {
   if (!topology.value || !cableStart.value) return
   const startNode = topology.value.nodes.find(item => item.name === cableStart.value?.nodeName)
   if (!startNode || startNode.name === node.name) { cableStart.value = null; return }
+  if (portIsOccupied(node, portIndex)) {
+    pageError.value = `Le port ${node.name}.${portLabel(node, portIndex)} est déjà utilisé par un câble.`
+    cableStart.value = null
+    return
+  }
   captureTopologyHistory()
   const startInterface = interfaceForPort(startNode, cableStart.value.portIndex)
   const targetInterface = interfaceForPort(node, portIndex, startInterface.network)
@@ -556,6 +588,11 @@ function connectPorts(node: Node, portIndex: number) {
 }
 function selectPort(event: MouseEvent, node: Node, index: number) {
   event.stopPropagation()
+  if (portIsOccupied(node, index)) {
+    pageError.value = `Le port ${node.name}.${portLabel(node, index)} est déjà utilisé par un câble.`
+    cableStart.value = null
+    return
+  }
   if (cableStart.value) connectPorts(node, index)
   else cableStart.value = { nodeName: node.name, portIndex: index }
 }
@@ -665,9 +702,11 @@ function connectTerminal(nodeName: string) {
 }
 function removeSelected() {
   if (!topology.value || !selected.value) return
+  const nodeName = selected.value
+  if (!window.confirm(`Supprimer l’équipement « ${nodeName} » et ses câbles ?`)) return
   captureTopologyHistory()
-  topology.value.nodes = topology.value.nodes.filter(node => node.name !== selected.value)
-  topology.value.links = topology.value.links.filter(link => link.from !== selected.value && link.to !== selected.value)
+  topology.value.nodes = topology.value.nodes.filter(node => node.name !== nodeName)
+  topology.value.links = topology.value.links.filter(link => link.from !== nodeName && link.to !== nodeName)
   selected.value = topology.value.nodes[0]?.name ?? null; dirty.value = true
 }
 function addNetwork() {
@@ -793,7 +832,29 @@ function portsText(profile: ServiceProfile) {
 function point(event: PointerEvent) {
   const svg = event.currentTarget as SVGSVGElement
   const rect = svg.getBoundingClientRect()
-  return { x: (event.clientX - rect.left) * 760 / rect.width, y: (event.clientY - rect.top) * 330 / rect.height }
+  const view = canvasView.value
+  return {
+    x: ((event.clientX - rect.left) * 760 / rect.width - view.x) / view.scale,
+    y: ((event.clientY - rect.top) * 330 / rect.height - view.y) / view.scale,
+  }
+}
+function zoomCanvas(event: WheelEvent) {
+  const nextScale = Math.max(0.65, Math.min(2.2, canvasView.value.scale * (event.deltaY < 0 ? 1.1 : 0.9)))
+  canvasView.value.scale = nextScale
+}
+function resetCanvasView() { canvasView.value = { x: 0, y: 0, scale: 1 } }
+function startCanvasPan(event: PointerEvent) {
+  const target = event.target as SVGElement
+  if (target !== event.currentTarget) return
+  const svg = event.currentTarget as SVGSVGElement
+  const rect = svg.getBoundingClientRect()
+  canvasPanning.value = true
+  const start = { x: event.clientX, y: event.clientY, viewX: canvasView.value.x, viewY: canvasView.value.y }
+  const move = (moveEvent: PointerEvent) => {
+    canvasView.value = { ...canvasView.value, x: start.viewX + (moveEvent.clientX - start.x) * 760 / rect.width, y: start.viewY + (moveEvent.clientY - start.y) * 330 / rect.height }
+  }
+  const stop = () => { canvasPanning.value = false; window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop) }
+  window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop)
 }
 function dragNode(event: PointerEvent, node: Node) {
   if (linkMode.value) { selectNode(node); return }
@@ -1057,7 +1118,7 @@ onUnmounted(() => {
         <button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button>
         <span v-if="operationBusy" class="operation-status" role="status">Opération en cours…</span>
       </section>
-      <section class="panel topology-workbench"><div class="section-title"><div><h2>Éditeur visuel</h2><span>glissez un équipement, puis reliez ses ports</span></div><div class="tools"><button class="secondary" @click="linkMode = !linkMode; linkStart = null; cableStart = null">{{ linkMode ? 'Annuler' : 'Relier par nœuds' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><div class="workbench"><aside class="palette"><div class="palette-heading"><strong>Équipements</strong><span>glisser-déposer</span></div><button v-for="item in paletteItems" :key="item.id" class="palette-item" :class="{ dragging: paletteDragId === item.id }" draggable="true" @dragstart="paletteDragStart(item, $event)" @dragend="paletteDragEnd"><span class="palette-icon">{{ item.icon }}</span><span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span></button><p class="palette-hint">Le switch virtuel ajoute un segment Docker bridge. Les ports sont les futures interfaces réseau du laboratoire.</p></aside><div class="canvas-wrap"><div class="canvas-help"><span>{{ cableHint }}</span><span v-if="cableStart" class="badge online">câblage en cours</span></div><svg class="canvas" viewBox="0 0 760 330" @dragover.prevent @drop.prevent="dropPalette"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="portPoint(topology.nodes.find(node => node.name === link.from)!, linkPortIndex(topology.nodes.find(node => node.name === link.from)!, link.from_port)).x" :y1="portPoint(topology.nodes.find(node => node.name === link.from)!, linkPortIndex(topology.nodes.find(node => node.name === link.from)!, link.from_port)).y" :x2="portPoint(topology.nodes.find(node => node.name === link.to)!, linkPortIndex(topology.nodes.find(node => node.name === link.to)!, link.to_port)).x" :y2="portPoint(topology.nodes.find(node => node.name === link.to)!, linkPortIndex(topology.nodes.find(node => node.name === link.to)!, link.to_port)).y" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)" @dblclick.stop="openDevicePanel(node)"><rect width="160" height="70" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text><text class="canvas-node-type" x="14" y="60">{{ node.router ? 'ROUTEUR' : node.service_id ? node.service_id.toUpperCase() : 'HÔTE' }}</text><g v-for="portIndex in portCount(node)" :key="`${node.name}-port-${portIndex}`" class="canvas-port" :class="{ active: cableStart?.nodeName === node.name && cableStart?.portIndex === portIndex - 1 }" :transform="`translate(160,${18 + ((portIndex - 1) * 24) / Math.max(1, portCount(node) - 1)})`" @pointerdown.stop @click.stop="selectPort($event, node, portIndex - 1)"><circle r="6" /><title>{{ portLabel(node, portIndex - 1) }}</title></g></g></svg></div></div></section>
+      <section class="panel topology-workbench"><div class="section-title"><div><h2>Éditeur visuel</h2><span>glissez un équipement, puis reliez ses ports</span></div><div class="tools"><button class="secondary" @click="linkMode = !linkMode; linkStart = null; cableStart = null">{{ linkMode ? 'Annuler' : 'Relier par nœuds' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><div class="workbench"><aside class="palette"><div class="palette-heading"><strong>Équipements</strong><span>glisser-déposer</span></div><button v-for="item in paletteItems" :key="item.id" class="palette-item" :class="{ dragging: paletteDragId === item.id }" draggable="true" @dragstart="paletteDragStart(item, $event)" @dragend="paletteDragEnd"><span class="palette-icon">{{ item.icon }}</span><span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span></button><p class="palette-hint">Le switch virtuel ajoute un segment Docker bridge. Les ports sont les futures interfaces réseau du laboratoire.</p></aside><div class="canvas-wrap"><div class="canvas-help"><span>{{ cableHint }}</span><span v-if="cableStart" class="badge online">câblage en cours</span><div class="canvas-controls"><button class="icon-button secondary" title="Réduire" @click="canvasView.scale = Math.max(0.65, canvasView.scale - 0.1)">−</button><span>{{ Math.round(canvasView.scale * 100) }}%</span><button class="icon-button secondary" title="Agrandir" @click="canvasView.scale = Math.min(2.2, canvasView.scale + 0.1)">+</button><button class="icon-button secondary" title="Réinitialiser la vue" @click="resetCanvasView">Réinitialiser</button></div></div><svg class="canvas" :class="{ panning: canvasPanning }" viewBox="0 0 760 330" @dragover.prevent @drop.prevent="dropPalette" @wheel.prevent="zoomCanvas" @pointerdown="startCanvasPan"><g :transform="`translate(${canvasView.x} ${canvasView.y}) scale(${canvasView.scale})`"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="portPoint(topology.nodes.find(node => node.name === link.from)!, linkPortIndex(topology.nodes.find(node => node.name === link.from)!, link.from_port)).x" :y1="portPoint(topology.nodes.find(node => node.name === link.from)!, linkPortIndex(topology.nodes.find(node => node.name === link.from)!, link.from_port)).y" :x2="portPoint(topology.nodes.find(node => node.name === link.to)!, linkPortIndex(topology.nodes.find(node => node.name === link.to)!, link.to_port)).x" :y2="portPoint(topology.nodes.find(node => node.name === link.to)!, linkPortIndex(topology.nodes.find(node => node.name === link.to)!, link.to_port)).y" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name, invalid: nodeHasTopologyIssue(node.name) }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)" @dblclick.stop="openDevicePanel(node)"><rect width="160" height="70" rx="10" /><title>{{ node.name }}{{ nodeHasTopologyIssue(node.name) ? ' — erreur de topologie' : '' }}</title><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text><text class="canvas-node-type" x="14" y="60">{{ node.router ? 'ROUTEUR' : node.service_id ? node.service_id.toUpperCase() : 'HÔTE' }}</text><g v-for="portIndex in portCount(node)" :key="`${node.name}-port-${portIndex}`" class="canvas-port" :class="{ active: cableStart?.nodeName === node.name && cableStart?.portIndex === portIndex - 1, occupied: portIsOccupied(node, portIndex - 1) }" :transform="`translate(160,${18 + ((portIndex - 1) * 24) / Math.max(1, portCount(node) - 1)})`" @pointerdown.stop @click.stop="selectPort($event, node, portIndex - 1)"><circle r="6" /><title>{{ portLabel(node, portIndex - 1) }}{{ portIsOccupied(node, portIndex - 1) ? ' — occupé' : ' — libre' }}</title></g></g></g></svg></div></div></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
         <div class="network-editor-grid">
