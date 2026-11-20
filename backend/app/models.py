@@ -161,6 +161,8 @@ class Link(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     from_node: str = Field(alias="from")
     to_node: str = Field(alias="to")
+    from_port: str | None = None
+    to_port: str | None = None
 
 
 class ConnectivityCheck(BaseModel):
@@ -250,6 +252,15 @@ class Topology(BaseModel):
                 raise ValueError("link references an unknown node")
             if link.from_node == link.to_node:
                 raise ValueError("a link cannot connect a node to itself")
+            if (link.from_port is None) != (link.to_port is None):
+                raise ValueError("link ports must be provided for both endpoints")
+            if link.from_port is not None and link.to_port is not None:
+                source = next(node for node in self.nodes if node.name == link.from_node)
+                target = next(node for node in self.nodes if node.name == link.to_node)
+                if link.from_port not in {interface.name for interface in source.interfaces}:
+                    raise ValueError(f"link references unknown port {link.from_node}.{link.from_port}")
+                if link.to_port not in {interface.name for interface in target.interfaces}:
+                    raise ValueError(f"link references unknown port {link.to_node}.{link.to_port}")
         return self
 
     def to_topology_dict(self) -> dict[str, Any]:

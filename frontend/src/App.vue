@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from './api'
 import type { Assignment, Group, GroupSubmission, Laboratory, ObservabilitySnapshot, ServiceProfile, SubmissionAttempt, User } from './api'
-import type { Node, StatusNode, Topology, VersionInfo } from './types'
+import type { Node, PaletteItem, StatusNode, Topology, VersionInfo } from './types'
 
 const user = ref<User | null>(null)
 const setupAvailable = ref(false)
@@ -68,6 +68,16 @@ const observability = ref<ObservabilitySnapshot | null>(null)
 const observabilityLoading = ref(false)
 const observabilityError = ref('')
 const observabilityRefreshAllowed = ref(true)
+const cableStart = ref<{ nodeName: string; portIndex: number } | null>(null)
+const paletteItems: PaletteItem[] = [
+  { id: 'pc-ubuntu', label: 'PC Ubuntu', description: 'poste Linux prêt pour les exercices IP', icon: 'PC', kind: 'node', image: 'netlab/ubuntu-lab:24.04', type: 'linux' },
+  { id: 'router-linux', label: 'Routeur Linux', description: 'routeur Debian avec forwarding IPv4', icon: 'R', kind: 'node', image: 'netlab/debian-router:bookworm', type: 'router', router: true },
+  { id: 'server-debian', label: 'Serveur Debian', description: 'serveur Linux avec outils réseau', icon: 'S', kind: 'node', image: 'netlab/debian-lab:bookworm', type: 'linux' },
+  { id: 'switch-virtual', label: 'Switch virtuel', description: 'ajoute un segment Docker bridge', icon: 'SW', kind: 'network' },
+  { id: 'nginx', label: 'Nginx', description: 'service web catalogue', icon: 'WEB', kind: 'service', serviceId: 'nginx' },
+  { id: 'apache', label: 'Apache', description: 'service web catalogue', icon: 'WEB', kind: 'service', serviceId: 'apache' },
+]
+const paletteDragId = ref('')
 let timer: number | undefined
 let observabilityTimer: number | undefined
 let observabilityCooldownTimer: number | undefined
@@ -82,6 +92,7 @@ const canModifyLaboratory = computed(() => ['teacher', 'admin'].includes(user.va
 const ownsLaboratory = computed(() => ['teacher', 'admin'].includes(user.value?.role ?? '') && activeLaboratory.value?.role === 'owner')
 const deployableServices = computed(() => serviceCatalog.value.filter(profile => profile.deployable))
 const topologyNetworks = computed(() => topology.value?.networks ?? [])
+const cableHint = computed(() => cableStart.value ? `Port sélectionné sur ${cableStart.value.nodeName}. Cliquez sur un autre port pour créer le câble.` : 'Faites glisser un équipement ici, puis cliquez sur deux ports pour les relier.')
 const topologyIssues = computed(() => {
   const current = topology.value
   if (!current || current.version < 2) return [] as string[]
@@ -486,13 +497,130 @@ async function saveSubmissionFeedback(submission: SubmissionAttempt) {
   } catch (error) { showError(error) }
 }
 
+function portCount(node: Node) {
+  return Math.max(node.interfaces?.length ?? 0, node.router ? 2 : 1)
+}
+function portLabel(node: Node, index: number) {
+  return node.interfaces?.[index]?.name ?? `eth${index}`
+}
+function portPoint(node: Node, index: number) {
+  const count = portCount(node)
+  return { x: node.position.x + 160, y: node.position.y + 18 + (index * 24) / Math.max(1, count - 1) }
+}
+function interfaceForPort(node: Node, index: number, network?: string) {
+  node.interfaces ??= []
+  while (node.interfaces.length <= index) node.interfaces.push({ name: `eth${node.interfaces.length}`, network: network ?? topology.value?.network.name ?? 'lan' })
+  if (network && node.interfaces[index].network !== network) node.interfaces[index].network = network
+  return node.interfaces[index]
+}
+function linkPortIndex(node: Node, portName: string | undefined) {
+  if (!portName) return 0
+  const index = node.interfaces?.findIndex(item => item.name === portName) ?? -1
+  return index >= 0 ? index : 0
+}
+function connectPorts(node: Node, portIndex: number) {
+  if (!topology.value || !cableStart.value) return
+  const startNode = topology.value.nodes.find(item => item.name === cableStart.value?.nodeName)
+  if (!startNode || startNode.name === node.name) { cableStart.value = null; return }
+  captureTopologyHistory()
+  const startInterface = interfaceForPort(startNode, cableStart.value.portIndex)
+  const targetInterface = interfaceForPort(node, portIndex, startInterface.network)
+  targetInterface.network = startInterface.network
+  topology.value.links ??= []
+  const exists = topology.value.links.some(link =>
+    (link.from === startNode.name && link.to === node.name) ||
+    (link.from === node.name && link.to === startNode.name),
+  )
+  if (!exists) topology.value.links.push({ from: startNode.name, to: node.name, from_port: startInterface.name, to_port: targetInterface.name })
+  dirty.value = true
+  cableStart.value = null
+  selected.value = node.name
+}
+function selectPort(event: MouseEvent, node: Node, index: number) {
+  event.stopPropagation()
+  if (cableStart.value) connectPorts(node, index)
+  else cableStart.value = { nodeName: node.name, portIndex: index }
+}
+function paletteDragStart(item: PaletteItem, event: DragEvent) {
+  paletteDragId.value = item.id
+  event.dataTransfer?.setData('application/x-netlab-palette', item.id)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy'
+}
+function paletteDragEnd() { paletteDragId.value = '' }
+function addPaletteItem(item: PaletteItem, position?: { x: number; y: number }) {
+  if (!topology.value) return
+  if (item.kind === 'network') {
+    const index = (topology.value.networks?.length ?? 0) + 1
+    const name = `lan-${index}`
+    topology.value.networks ??= []
+    topology.value.networks.push({ name, driver: 'bridge', subnet: `10.0.${index}.0/24` })
+    dirty.value = true
+    pageError.value = `Switch virtuel ajouté : le segment ${name} est prêt à être utilisé.`
+    return
+  }
+  if (item.kind === 'service') {
+    selectedServiceId.value = item.serviceId ?? selectedServiceId.value
+    addCatalogService(position)
+    return
+  }
+  const base = item.id.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'node'
+  let name = base
+  let index = 2
+  while (topology.value.nodes.some(node => node.name === name)) name = `${base}-${index++}`
+  captureTopologyHistory()
+  const node: Node = {
+    name, image: item.image ?? 'netlab/debian-lab:bookworm', command: ['sleep', 'infinity'],
+    position: position ?? { x: 60 + (topology.value.nodes.length % 3) * 220, y: 90 + Math.floor(topology.value.nodes.length / 3) * 110 },
+    type: item.type, router: item.router, environment: {}, secret_refs: {}, depends_on: [],
+  }
+  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
+  if (item.router) node.interfaces = [
+    { name: 'eth0', network: topology.value.network.name },
+    { name: 'eth1', network: topology.value.networks?.[1]?.name ?? topology.value.network.name },
+  ]
+  topology.value.nodes.push(node)
+  selected.value = name
+  dirty.value = true
+}
+function dropPalette(event: DragEvent) {
+  event.preventDefault()
+  const id = event.dataTransfer?.getData('application/x-netlab-palette') || paletteDragId.value
+  const item = paletteItems.find(candidate => candidate.id === id)
+  if (!item) return
+  addPaletteItem(item, point(event as unknown as PointerEvent))
+  paletteDragEnd()
+}
+function addCatalogService(position?: { x: number; y: number }) {
+  if (!topology.value) return
+  const profile = deployableServices.value.find(item => item.id === selectedServiceId.value)
+  if (!profile?.image) return
+  let name = `${profile.id}-${topology.value.nodes.length + 1}`
+  let index = 2
+  while (topology.value.nodes.some(node => node.name === name)) name = `${profile.id}-${topology.value.nodes.length + index++}`
+  captureTopologyHistory()
+  const node: Node = {
+    name, image: profile.image, command: [...profile.command], service_id: profile.id,
+    position: position ?? { x: 60 + (topology.value.nodes.length % 3) * 220, y: 90 + Math.floor(topology.value.nodes.length / 3) * 110 },
+    environment: {}, secret_refs: {}, depends_on: [],
+  }
+  if (profile.id === 'coredns') node.dns_records = []
+  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
+  topology.value.nodes.push(node); selected.value = name; dirty.value = true
+}
 function selectNode(node: Node) {
   if (linkMode.value) {
     if (!linkStart.value) linkStart.value = node.name
     else if (linkStart.value !== node.name && topology.value) {
       topology.value.links ??= []
       const exists = topology.value.links.some(link => (link.from === linkStart.value && link.to === node.name) || (link.from === node.name && link.to === linkStart.value))
-      if (!exists) topology.value.links.push({ from: linkStart.value, to: node.name })
+      if (!exists) {
+        const source = topology.value.nodes.find(item => item.name === linkStart.value)
+        if (source) {
+          const sourceInterface = interfaceForPort(source, 0)
+          const targetInterface = interfaceForPort(node, 0, sourceInterface.network)
+          topology.value.links.push({ from: source.name, to: node.name, from_port: sourceInterface.name, to_port: targetInterface.name })
+        }
+      }
       linkStart.value = null; linkMode.value = false; dirty.value = true
     }
     return
@@ -551,6 +679,11 @@ function addInterface(node: Node) {
 }
 function removeInterface(node: Node, index: number) {
   if (!node.interfaces || node.interfaces.length <= 1) return
+  const portName = node.interfaces[index]?.name
+  if (portName && topology.value?.links.some(link => (link.from === node.name && link.from_port === portName) || (link.to === node.name && link.to_port === portName))) {
+    pageError.value = `Impossible de supprimer ${node.name}.${portName} : ce port est utilisé par un câble.`
+    return
+  }
   node.interfaces.splice(index, 1)
   dirty.value = true
 }
@@ -606,34 +739,6 @@ function addNode() {
   if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
   topology.value.nodes.push(node)
   selected.value = name; dirty.value = true
-}
-function addCatalogService() {
-  if (!topology.value) return
-  const profile = deployableServices.value.find(item => item.id === selectedServiceId.value)
-  if (!profile?.image) return
-  const name = window.prompt('Nom du nœud :', `${profile.id}-${topology.value.nodes.length + 1}`)
-  if (!name) return
-  if (topology.value.nodes.some(node => node.name === name)) { pageError.value = 'Ce nom de nœud existe déjà.'; return }
-  captureTopologyHistory()
-  let publishedPort: number | undefined
-  if (profile.primary_port) {
-    const rawPort = window.prompt(`Port hôte facultatif lié seulement à 127.0.0.1 (port du conteneur ${profile.primary_port}). Vide = réseau Docker uniquement.`, '')
-    if (rawPort === null) return
-    if (rawPort.trim()) {
-      const parsed = Number(rawPort)
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) { pageError.value = 'Le port doit être un entier entre 1 et 65535.'; return }
-      if (topology.value.nodes.some(node => node.published_port === parsed)) { pageError.value = 'Ce port hôte est déjà utilisé dans cette topologie.'; return }
-      publishedPort = parsed
-    }
-  }
-  const node: Node = {
-    name, image: profile.image, command: [...profile.command], service_id: profile.id,
-    position: { x: 60 + topology.value.nodes.length * 210, y: 110 }, environment: {}, secret_refs: {}, depends_on: [],
-  }
-  if (profile.id === 'coredns') node.dns_records = []
-  if (topology.value.version >= 2) node.interfaces = [{ name: 'eth0', network: topology.value.network.name }]
-  if (publishedPort !== undefined) node.published_port = publishedPort
-  topology.value.nodes.push(node); selected.value = name; dirty.value = true
 }
 function setNodeEnvironment(node: Node, key: string, value: string) {
   node.environment ??= {}
@@ -927,7 +1032,7 @@ onUnmounted(() => {
         <button class="secondary" :disabled="!canModifyLaboratory" @click="applyTemplate">Charger le modèle</button>
         <span v-if="operationBusy" class="operation-status" role="status">Opération en cours…</span>
       </section>
-      <section class="panel"><div class="section-title"><div><h2>Éditeur de topologie</h2><span>réseau {{ topology.network.name }}</span></div><div class="tools"><select v-model="selectedServiceId" class="service-select" aria-label="Profil catalogue"><option v-for="profile in deployableServices" :key="profile.id" :value="profile.id">{{ profile.label }}</option></select><button class="secondary" @click="addCatalogService">Ajouter le profil</button><button class="secondary" @click="addNode">Nœud personnalisé</button><button class="secondary" @click="linkMode = !linkMode; linkStart = null">{{ linkMode ? 'Annuler' : 'Relier' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><p class="hint">Profils disponibles : Nginx, Apache, CoreDNS, PostgreSQL, MySQL et MongoDB. Les bases utilisent des volumes persistants et des secrets référencés hors topologie. {{ linkMode ? 'Mode liaison actif : sélectionnez deux nœuds.' : 'Sélectionnez un nœud pour le terminal.' }}</p><svg class="canvas" viewBox="0 0 760 330"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="(topology.nodes.find(node => node.name === link.from)?.position.x ?? 0) + 80" :y1="(topology.nodes.find(node => node.name === link.from)?.position.y ?? 0) + 30" :x2="(topology.nodes.find(node => node.name === link.to)?.position.x ?? 0) + 80" :y2="(topology.nodes.find(node => node.name === link.to)?.position.y ?? 0) + 30" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="60" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text></g></svg></section>
+      <section class="panel topology-workbench"><div class="section-title"><div><h2>Éditeur visuel</h2><span>glissez un équipement, puis reliez ses ports</span></div><div class="tools"><button class="secondary" @click="linkMode = !linkMode; linkStart = null; cableStart = null">{{ linkMode ? 'Annuler' : 'Relier par nœuds' }}</button><button class="danger" @click="removeSelected">Supprimer</button></div></div><div class="workbench"><aside class="palette"><div class="palette-heading"><strong>Équipements</strong><span>glisser-déposer</span></div><button v-for="item in paletteItems" :key="item.id" class="palette-item" :class="{ dragging: paletteDragId === item.id }" draggable="true" @dragstart="paletteDragStart(item, $event)" @dragend="paletteDragEnd"><span class="palette-icon">{{ item.icon }}</span><span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span></button><p class="palette-hint">Le switch virtuel ajoute un segment Docker bridge. Les ports sont les futures interfaces réseau du laboratoire.</p></aside><div class="canvas-wrap"><div class="canvas-help"><span>{{ cableHint }}</span><span v-if="cableStart" class="badge online">câblage en cours</span></div><svg class="canvas" viewBox="0 0 760 330" @dragover.prevent @drop.prevent="dropPalette"><line v-for="(link, index) in topology.links" :key="`link-${index}`" class="topology-link" :x1="portPoint(topology.nodes.find(node => node.name === link.from)!, linkPortIndex(topology.nodes.find(node => node.name === link.from)!, link.from_port)).x" :y1="portPoint(topology.nodes.find(node => node.name === link.from)!, linkPortIndex(topology.nodes.find(node => node.name === link.from)!, link.from_port)).y" :x2="portPoint(topology.nodes.find(node => node.name === link.to)!, linkPortIndex(topology.nodes.find(node => node.name === link.to)!, link.to_port)).x" :y2="portPoint(topology.nodes.find(node => node.name === link.to)!, linkPortIndex(topology.nodes.find(node => node.name === link.to)!, link.to_port)).y" /><g v-for="node in topology.nodes" :key="node.name" class="canvas-node" :class="{ selected: selected === node.name }" :transform="`translate(${node.position.x},${node.position.y})`" @pointerdown="dragNode($event, node)"><rect width="160" height="70" rx="10" /><text class="canvas-node-title" x="14" y="24">{{ node.name }}</text><text class="canvas-node-image" x="14" y="44">{{ node.image }}</text><text class="canvas-node-type" x="14" y="60">{{ node.router ? 'ROUTEUR' : node.service_id ? node.service_id.toUpperCase() : 'HÔTE' }}</text><g v-for="portIndex in portCount(node)" :key="`${node.name}-port-${portIndex}`" class="canvas-port" :class="{ active: cableStart?.nodeName === node.name && cableStart?.portIndex === portIndex - 1 }" :transform="`translate(160,${18 + ((portIndex - 1) * 24) / Math.max(1, portCount(node) - 1)})`" @pointerdown.stop @click.stop="selectPort($event, node, portIndex - 1)"><circle r="6" /><title>{{ portLabel(node, portIndex - 1) }}</title></g></g></svg></div></div></section>
       <section v-if="topology.version >= 2" class="panel topology-config">
         <div class="section-title"><div><h2>Configuration réseau v2</h2><span>segments Docker, interfaces IPv4 et routes statiques</span></div><button class="secondary" @click="addNetwork">Ajouter un segment</button></div>
         <div class="network-editor-grid">
