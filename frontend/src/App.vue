@@ -70,7 +70,7 @@ const observabilityError = ref('')
 const observabilityRefreshAllowed = ref(true)
 const cableStart = ref<{ nodeName: string; portIndex: number } | null>(null)
 const devicePanelOpen = ref(false)
-const devicePanelTab = ref<'terminal' | 'config'>('terminal')
+const devicePanelTab = ref<'terminal' | 'network' | 'logs' | 'resources'>('terminal')
 const paletteItems: PaletteItem[] = [
   { id: 'pc-ubuntu', label: 'PC Ubuntu', description: 'poste Linux prêt pour les exercices IP', icon: 'PC', kind: 'node', image: 'netlab/ubuntu-lab:24.04', type: 'linux' },
   { id: 'router-linux', label: 'Routeur Linux', description: 'routeur Debian avec forwarding IPv4', icon: 'R', kind: 'node', image: 'netlab/debian-router:bookworm', type: 'router', router: true },
@@ -86,6 +86,22 @@ let observabilityCooldownTimer: number | undefined
 
 const selectedNode = computed(() => topology.value?.nodes.find(node => node.name === selected.value))
 const selectedServiceProfile = computed(() => serviceCatalog.value.find(profile => profile.id === selectedNode.value?.service_id))
+const selectedObservabilityNode = computed(() => {
+  if (!selectedNode.value) return undefined
+  return observability.value?.nodes.find(node =>
+    node.name === selectedNode.value?.name &&
+    (!activeLaboratoryId.value || node.laboratory_id === activeLaboratoryId.value || node.lab === topology.value?.lab),
+  )
+})
+const selectedNodeLogs = computed(() => {
+  if (!selectedNode.value) return []
+  const needle = selectedNode.value.name.toLowerCase()
+  return logs.value.filter(entry => entry.toLowerCase().includes(needle))
+})
+const selectedNodeLinks = computed(() => {
+  if (!selectedNode.value || !topology.value) return []
+  return topology.value.links.filter(link => link.from === selectedNode.value?.name || link.to === selectedNode.value?.name)
+})
 const stateText = computed(() => dirty.value ? 'modifications non sauvegardées' : 'contrôle actif')
 const activeAssignment = computed(() => assignments.value.find(item => item.id === activeAssignmentId.value))
 const selectedStudentNode = computed(() => activeAssignment.value?.topology.nodes.find(node => node.name === studentSelectedNodeName.value))
@@ -630,11 +646,12 @@ function selectNode(node: Node) {
   selected.value = node.name
   connectTerminal(node.name)
 }
-function openDevicePanel(node: Node, tab: 'terminal' | 'config' = 'terminal') {
+function openDevicePanel(node: Node, tab: 'terminal' | 'network' | 'logs' | 'resources' = 'terminal') {
   selected.value = node.name
   devicePanelTab.value = tab
   devicePanelOpen.value = true
   if (tab === 'terminal') connectTerminal(node.name)
+  else terminalSocket.value?.close()
 }
 function connectTerminal(nodeName: string) {
   if (!activeLaboratoryId.value || !canModifyLaboratory.value) return
@@ -1140,7 +1157,17 @@ onUnmounted(() => {
           </article>
         </section>
       </section>
-      <section v-if="devicePanelOpen && selectedNode" class="device-modal" role="dialog" aria-modal="true" :aria-label="`Équipement ${selectedNode.name}`" @click.self="devicePanelOpen = false"><div class="device-window"><div class="section-title"><div><p class="eyebrow">ÉQUIPEMENT / CONSOLE</p><h2>{{ selectedNode.name }}</h2><span>{{ selectedNode.image }} · {{ nodeStatus(selectedNode.name) }}</span></div><button class="secondary" @click="devicePanelOpen = false">Fermer</button></div><div class="device-tabs"><button :class="{ active: devicePanelTab === 'terminal' }" @click="devicePanelTab = 'terminal'; connectTerminal(selectedNode!.name)">Terminal</button><button :class="{ active: devicePanelTab === 'config' }" @click="devicePanelTab = 'config'">Configuration</button></div><div v-if="devicePanelTab === 'terminal'" class="device-terminal"><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div><p class="hint">Les commandes passent par le WebSocket vers le conteneur réel. Le terminal n’est disponible que lorsque le laboratoire est démarré.</p></div><div v-else class="device-config"><label>Image Docker<input v-model="selectedNode.image" :readonly="Boolean(selectedNode.service_id)" @input="dirty = true" /></label><label v-if="!selectedNode.service_id">Commande de démarrage<input :value="nodeCommand(selectedNode)" placeholder="sleep infinity" @input="setNodeCommand(selectedNode, ($event.target as HTMLInputElement).value)" /></label><label class="router-toggle"><input v-model="selectedNode.router" type="checkbox" @change="selectedNode.type = selectedNode.router ? 'router' : 'linux'; dirty = true" /> Activer le forwarding IPv4</label><div class="device-interfaces"><strong>Interfaces réseau</strong><div v-for="interfaceItem in selectedNode.interfaces" :key="`${selectedNode.name}-${interfaceItem.name}`" class="interface-row"><span>{{ interfaceItem.name }}</span><span>{{ interfaceItem.network }}</span><span>{{ interfaceItem.ipv4 || 'adresse automatique' }}</span></div></div><p class="hint">La configuration détaillée des interfaces, routes, secrets et dépendances reste disponible dans le panneau réseau sous le canvas.</p></div></div></section>
+      <section v-if="devicePanelOpen && selectedNode" class="device-modal" role="dialog" aria-modal="true" :aria-label="`Équipement ${selectedNode.name}`" @click.self="devicePanelOpen = false"><div class="device-window"><div class="section-title"><div><p class="eyebrow">ÉQUIPEMENT / CONSOLE</p><h2>{{ selectedNode.name }}</h2><span>{{ selectedNode.image }} · {{ nodeStatus(selectedNode.name) }}</span></div><button class="secondary" @click="devicePanelOpen = false">Fermer</button></div><div class="device-tabs" role="tablist" aria-label="Informations de l’équipement">
+<button :class="{ active: devicePanelTab === 'terminal' }" role="tab" :aria-selected="devicePanelTab === 'terminal'" @click="devicePanelTab = 'terminal'; connectTerminal(selectedNode!.name)">Terminal</button>
+<button :class="{ active: devicePanelTab === 'network' }" role="tab" :aria-selected="devicePanelTab === 'network'" @click="devicePanelTab = 'network'; terminalSocket?.close()">Réseau</button>
+<button :class="{ active: devicePanelTab === 'logs' }" role="tab" :aria-selected="devicePanelTab === 'logs'" @click="devicePanelTab = 'logs'; terminalSocket?.close()">Journaux</button>
+<button :class="{ active: devicePanelTab === 'resources' }" role="tab" :aria-selected="devicePanelTab === 'resources'" @click="devicePanelTab = 'resources'; terminalSocket?.close()">Ressources</button>
+</div>
+<div v-if="devicePanelTab === 'terminal'" class="device-terminal"><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div><p class="hint">Les commandes passent par le WebSocket vers le conteneur réel. Le terminal n’est disponible que lorsque le laboratoire est démarré.</p></div>
+<div v-else-if="devicePanelTab === 'network'" class="device-config"><div class="device-summary"><span class="badge online">{{ selectedNode.router ? 'routeur' : selectedNode.service_id ? selectedNode.service_id : 'hôte Linux' }}</span><span>{{ selectedNodeLinks.length }} câble(s) connecté(s)</span></div><div class="device-interfaces"><strong>Interfaces réseau</strong><div v-for="interfaceItem in selectedNode.interfaces" :key="`${selectedNode.name}-${interfaceItem.name}`" class="interface-row"><span>{{ interfaceItem.name }}</span><span>{{ interfaceItem.network }}</span><span>{{ interfaceItem.ipv4 || 'adresse automatique' }}</span><span>{{ interfaceItem.gateway || 'sans passerelle' }}</span></div><p v-if="!selectedNode.interfaces?.length" class="hint">Aucune interface configurée.</p></div><div class="device-links"><strong>Câbles</strong><ul><li v-for="link in selectedNodeLinks" :key="`${link.from}-${link.to}-${link.from_port}-${link.to_port}`">{{ link.from }}.{{ link.from_port || 'eth0' }} ↔ {{ link.to }}.{{ link.to_port || 'eth0' }}</li><li v-if="!selectedNodeLinks.length" class="muted">Aucun câble connecté.</li></ul></div><p class="hint">La configuration détaillée des interfaces et routes reste disponible dans le panneau réseau sous le canvas.</p></div>
+<div v-else-if="devicePanelTab === 'logs'" class="device-log-panel"><div class="section-title"><strong>Événements associés</strong><span>{{ selectedNodeLogs.length }} entrée(s)</span></div><pre>{{ selectedNodeLogs.length ? selectedNodeLogs.join('\n') : 'Aucun événement associé à cet équipement.' }}</pre><p class="hint">Les événements généraux du laboratoire restent visibles dans le journal principal.</p></div>
+<div v-else class="device-resource-panel"><div class="resource-grid"><article><span>État</span><strong>{{ selectedObservabilityNode?.state || nodeStatus(selectedNode.name) }}</strong></article><article><span>CPU</span><strong>{{ selectedObservabilityNode?.cpu_percent == null ? '—' : `${selectedObservabilityNode.cpu_percent.toFixed(1)} %` }}</strong></article><article><span>Mémoire</span><strong>{{ selectedObservabilityNode?.memory_percent == null ? '—' : `${selectedObservabilityNode.memory_percent.toFixed(1)} %` }}</strong></article><article><span>Réseau</span><strong>{{ selectedObservabilityNode ? `${bytesText(selectedObservabilityNode.network_rx_bytes)} reçus · ${bytesText(selectedObservabilityNode.network_tx_bytes)} envoyés` : '—' }}</strong></article></div><p v-if="!selectedObservabilityNode" class="hint">Les métriques détaillées apparaîtront lorsque Docker sera disponible et que la supervision aura collecté cet équipement.</p><div v-else class="resource-details"><span>Image <strong>{{ selectedObservabilityNode.image }}</strong></span><span>Processus <strong>{{ selectedObservabilityNode.pids_limit ?? 'sans limite déclarée' }}</strong></span><span>Stockage écrivable <strong>{{ bytesText(selectedObservabilityNode.writable_size_bytes) }}</strong></span></div></div>
+</div></section>
       <section class="lower"><div class="panel"><div class="section-title"><h2>Terminal WebSocket</h2><span>{{ selectedNode?.name ?? 'aucun nœud' }} · {{ selectedNode ? nodeStatus(selectedNode.name) : '' }}</span></div><div class="terminal"><div>{{ terminalOutput }}</div><form @submit.prevent="runTerminal"><span>$</span><input v-model="terminalCommand" aria-label="Commande terminal" placeholder="commande shell" /><button>Envoyer</button></form></div></div><div class="panel"><div class="section-title"><h2>Journal</h2></div><pre>{{ logs.length ? logs.join('\n') : 'Aucun événement.' }}</pre></div></section>
       </template>
       <p v-if="!topology" class="loading">Impossible de charger le laboratoire. Vérifiez l’API et la configuration du compte.</p>
